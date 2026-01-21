@@ -79,7 +79,7 @@
               description = "diald package to run.";
             };
             device = lib.mkOption {
-              type = lib.types.nullOr lib.types.path;
+              type = lib.types.nullOr lib.types.str;
               default = null;
               description = "Input device path (e.g. /dev/input/event2).";
             };
