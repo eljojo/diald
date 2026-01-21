@@ -76,7 +76,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match event.kind() {
                     InputEventKind::RelAxis(RelativeAxisType::REL_DIAL) => {
                         let now = Instant::now();
-                        pending_rotate = Some((event.value(), now + debounce_window));
+                        match pending_rotate {
+                            Some((value, deadline)) if now >= deadline => {
+                                println!("diald: rotate {}", value);
+                                pending_rotate = Some((event.value(), now + debounce_window));
+                            }
+                            Some((_value, deadline)) => {
+                                pending_rotate = Some((event.value(), deadline));
+                            }
+                            None => {
+                                pending_rotate = Some((event.value(), now + debounce_window));
+                            }
+                        }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
                         let state = if event.value() == 1 { "down" } else { "up" };
