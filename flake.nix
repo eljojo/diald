@@ -75,7 +75,7 @@
             enable = lib.mkEnableOption "Surface Dial event daemon";
             package = lib.mkOption {
               type = lib.types.package;
-              default = self.packages.${pkgs.system}.default;
+              default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
               description = "diald package to run.";
             };
             device = lib.mkOption {
