@@ -24,6 +24,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut pending_rotate: Option<(i32, Instant)> = None;
     let debounce_window = Duration::from_millis(500);
+    let idle_reset = Duration::from_secs(2);
+    let latch_threshold = 30;
+    let mut latched = true;
+    let mut last_event_at: Option<Instant> = None;
 
     let mut open_error_logged = false;
     loop {
@@ -50,9 +54,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         loop {
+            if let Some(last_event) = last_event_at {
+                if Instant::now().duration_since(last_event) >= idle_reset {
+                    pending_rotate = None;
+                    latched = true;
+                    last_event_at = None;
+                }
+            }
+
             if let Some((value, deadline)) = pending_rotate {
                 if Instant::now() >= deadline {
-                    println!("diald: rotate {}", value);
+                    if latched {
+                        if value.abs() >= latch_threshold {
+                            let direction = if value > 0 { "up" } else { "down" };
+                            println!("diald: volume {} {}", direction, value.abs());
+                            latched = false;
+                        }
+                    } else if value != 0 {
+                        let direction = if value > 0 { "up" } else { "down" };
+                        println!("diald: volume {} {}", direction, value.abs());
+                    }
                     pending_rotate = None;
                 }
             }
@@ -66,6 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         err
                     );
                     pending_rotate = None;
+                    latched = true;
+                    last_event_at = None;
                     break;
                 }
             };
@@ -73,12 +96,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut saw_event = false;
             for event in events {
                 saw_event = true;
+                last_event_at = Some(Instant::now());
                 match event.kind() {
                     InputEventKind::RelAxis(RelativeAxisType::REL_DIAL) => {
                         let now = Instant::now();
                         match pending_rotate {
                             Some((value, deadline)) if now >= deadline => {
-                                println!("diald: rotate {}", value);
+                                if latched {
+                                    if value.abs() >= latch_threshold {
+                                        let direction = if value > 0 { "up" } else { "down" };
+                                        println!("diald: volume {} {}", direction, value.abs());
+                                        latched = false;
+                                    }
+                                } else if value != 0 {
+                                    let direction = if value > 0 { "up" } else { "down" };
+                                    println!("diald: volume {} {}", direction, value.abs());
+                                }
                                 pending_rotate = Some((event.value(), now + debounce_window));
                             }
                             Some((value, deadline)) => {
