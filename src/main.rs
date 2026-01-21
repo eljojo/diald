@@ -25,20 +25,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_rotate: Option<(i32, Instant)> = None;
     let debounce_window = Duration::from_millis(500);
 
+    let mut open_error_logged = false;
     loop {
         let mut device = loop {
             match Device::open(&device_path) {
                 Ok(device) => {
                     println!("diald: opened {}", device_path.display());
                     println!("diald: name={:?}", device.name());
+                    open_error_logged = false;
                     break device;
                 }
                 Err(err) => {
-                    println!(
-                        "diald: failed to open {} ({}), retrying...",
-                        device_path.display(),
-                        err
-                    );
+                    if !open_error_logged {
+                        println!(
+                            "diald: failed to open {} ({}), retrying...",
+                            device_path.display(),
+                            err
+                        );
+                        open_error_logged = true;
+                    }
                     thread::sleep(Duration::from_secs(1));
                 }
             }
