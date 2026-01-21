@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let idle_reset = Duration::from_secs(2);
     let latch_threshold = 30;
     let mut latched = true;
+    let mut skip_next_rotate_emit = true;
     let mut last_event_at: Option<Instant> = None;
 
     let mut open_error_logged = false;
@@ -58,12 +59,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if Instant::now().duration_since(last_event) >= idle_reset {
                     pending_rotate = None;
                     latched = true;
+                    skip_next_rotate_emit = true;
                     last_event_at = None;
                 }
             }
 
             if let Some((value, deadline)) = pending_rotate {
                 if Instant::now() >= deadline {
+                    if skip_next_rotate_emit {
+                        pending_rotate = None;
+                        skip_next_rotate_emit = false;
+                        continue;
+                    }
                     if latched {
                         if value.abs() >= latch_threshold {
                             let direction = if value > 0 { "up" } else { "down" };
@@ -88,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     pending_rotate = None;
                     latched = true;
+                    skip_next_rotate_emit = true;
                     last_event_at = None;
                     break;
                 }
@@ -102,6 +110,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let now = Instant::now();
                         match pending_rotate {
                             Some((value, deadline)) if now >= deadline => {
+                                if skip_next_rotate_emit {
+                                    pending_rotate = Some((event.value(), now + debounce_window));
+                                    skip_next_rotate_emit = false;
+                                    continue;
+                                }
                                 if latched {
                                     if value.abs() >= latch_threshold {
                                         let direction = if value > 0 { "up" } else { "down" };
