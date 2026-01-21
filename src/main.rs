@@ -81,8 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("diald: rotate {}", value);
                                 pending_rotate = Some((event.value(), now + debounce_window));
                             }
-                            Some((_value, deadline)) => {
-                                pending_rotate = Some((event.value(), deadline));
+                            Some((value, deadline)) => {
+                                pending_rotate = Some((value + event.value(), deadline));
                             }
                             None => {
                                 pending_rotate = Some((event.value(), now + debounce_window));
