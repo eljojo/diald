@@ -101,7 +101,7 @@
                 ExecStart = "${cfg.package}/bin/diald --device ${cfg.device}";
                 Restart = "on-failure";
                 DynamicUser = true;
-                SupplementaryGroups = [ "input" "hidraw" ];
+                SupplementaryGroups = [ "input" ];
               };
             };
 
