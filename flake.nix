@@ -107,7 +107,8 @@
 
             services.udev.extraRules = ''
               # Allow diald (input group) to access Surface Dial haptics on hidraw.
-              KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="091b", MODE="0660", GROUP="input"
+              # Device is Bluetooth HID (uhid), so match on parent KERNELS pattern: bus:vendor:product.instance
+              KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="*:045E:091B.*", MODE="0660", GROUP="input"
             '';
           };
         };
