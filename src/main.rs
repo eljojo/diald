@@ -1,5 +1,5 @@
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::thread;
@@ -19,30 +19,104 @@ fn parse_device_arg() -> Option<PathBuf> {
     None
 }
 
-fn open_haptic_device() -> Option<std::fs::File> {
-    let path = env::var("DIALD_HAPTIC_DEV").unwrap_or_else(|_| "/dev/hidraw0".to_string());
-    match OpenOptions::new().write(true).open(&path) {
-        Ok(file) => {
-            println!("diald: opened haptics {}", path);
-            Some(file)
+struct HapticDevice {
+    file: Option<File>,
+    path: String,
+}
+
+impl HapticDevice {
+    fn new() -> Self {
+        let path = env::var("DIALD_HAPTIC_DEV").unwrap_or_else(|_| "/dev/hidraw0".to_string());
+        let file = Self::try_open(&path);
+        Self { file, path }
+    }
+
+    fn try_open(path: &str) -> Option<File> {
+        match OpenOptions::new().write(true).open(path) {
+            Ok(file) => {
+                println!("diald: opened haptics {}", path);
+                Some(file)
+            }
+            Err(err) => {
+                println!("diald: failed to open haptics {} ({})", path, err);
+                None
+            }
         }
-        Err(err) => {
-            println!("diald: failed to open haptics {} ({})", path, err);
-            None
+    }
+
+    fn reconnect(&mut self) {
+        self.file = Self::try_open(&self.path);
+    }
+
+    fn send_chunky(&mut self) {
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        // Report ID 1 output: repeat=2, manual=3, retrigger=70 (chunky)
+        let payload = [1u8, 2u8, 3u8, 70u8, 0u8];
+        if let Err(err) = file.write_all(&payload) {
+            println!("diald: haptics write failed ({})", err);
+            self.file = None;
         }
     }
 }
 
-fn send_haptic_chunky(haptic: &mut Option<std::fs::File>) {
-    let Some(file) = haptic.as_mut() else {
+struct DialState {
+    pending_rotate: Option<(i32, Instant)>,
+    latched: bool,
+    skip_next_rotate_event: bool,
+    last_event_at: Option<Instant>,
+    clicking: bool,
+    click_started_at: Option<Instant>,
+}
+
+impl DialState {
+    fn new() -> Self {
+        Self {
+            pending_rotate: None,
+            latched: true,
+            skip_next_rotate_event: true,
+            last_event_at: None,
+            clicking: false,
+            click_started_at: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.pending_rotate = None;
+        self.latched = true;
+        self.skip_next_rotate_event = true;
+        self.last_event_at = None;
+    }
+}
+
+fn emit_volume_change(value: i32, haptic: &mut HapticDevice) {
+    let direction = if value > 0 { "up" } else { "down" };
+    println!("diald: volume {} {}", direction, value.abs());
+    haptic.send_chunky();
+}
+
+fn process_pending_rotate(
+    state: &mut DialState,
+    haptic: &mut HapticDevice,
+    latch_threshold: i32,
+    min_volume_delta: i32,
+) {
+    let Some((value, deadline)) = state.pending_rotate else {
         return;
     };
-    // Report ID 1 output: repeat=2, manual=3, retrigger=70 (chunky)
-    let payload = [1u8, 2u8, 3u8, 70u8, 0u8];
-    if let Err(err) = file.write_all(&payload) {
-        println!("diald: haptics write failed ({})", err);
-        *haptic = None;
+    if Instant::now() < deadline {
+        return;
     }
+    if state.latched {
+        if value.abs() >= latch_threshold {
+            emit_volume_change(value, haptic);
+            state.latched = false;
+        }
+    } else if value.abs() >= min_volume_delta {
+        emit_volume_change(value, haptic);
+    }
+    state.pending_rotate = None;
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,19 +124,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| env::var_os("DIALD_DEVICE").map(PathBuf::from))
         .ok_or("missing device path; pass --device or set DIALD_DEVICE")?;
 
-    let mut haptic = open_haptic_device();
+    let mut haptic = HapticDevice::new();
+    let mut state = DialState::new();
 
-    let mut pending_rotate: Option<(i32, Instant)> = None;
     let debounce_window = Duration::from_millis(500);
     let idle_reset = Duration::from_secs(2);
     let click_timeout = Duration::from_secs(2);
     let latch_threshold = 100;
     let min_volume_delta = 10;
-    let mut latched = true;
-    let mut skip_next_rotate_event = true;
-    let mut last_event_at: Option<Instant> = None;
-    let mut clicking = false;
-    let mut click_started_at: Option<Instant> = None;
 
     let mut open_error_logged = false;
     loop {
@@ -72,6 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("diald: opened {}", device_path.display());
                     println!("diald: name={:?}", device.name());
                     open_error_logged = false;
+                    haptic.reconnect();
                     break device;
                 }
                 Err(err) => {
@@ -89,43 +159,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         loop {
-            if let Some(last_event) = last_event_at {
+            // Reset state after idle period
+            if let Some(last_event) = state.last_event_at {
                 if Instant::now().duration_since(last_event) >= idle_reset {
-                    pending_rotate = None;
-                    latched = true;
-                    skip_next_rotate_event = true;
-                    last_event_at = None;
+                    state.reset();
                 }
             }
 
-            if clicking {
-                if let Some(started_at) = click_started_at {
+            // Handle click timeout
+            if state.clicking {
+                if let Some(started_at) = state.click_started_at {
                     if Instant::now().duration_since(started_at) >= click_timeout {
                         println!("diald: click aborted (timeout)");
-                        clicking = false;
-                        click_started_at = None;
-                        pending_rotate = None;
+                        state.clicking = false;
+                        state.click_started_at = None;
+                        state.pending_rotate = None;
                     }
                 }
             }
 
-            if let Some((value, deadline)) = pending_rotate {
-                if Instant::now() >= deadline {
-                    if latched {
-                        if value.abs() >= latch_threshold {
-                            let direction = if value > 0 { "up" } else { "down" };
-                            println!("diald: volume {} {}", direction, value.abs());
-                            send_haptic_chunky(&mut haptic);
-                            latched = false;
-                        }
-                    } else if value.abs() >= min_volume_delta {
-                        let direction = if value > 0 { "up" } else { "down" };
-                        println!("diald: volume {} {}", direction, value.abs());
-                        send_haptic_chunky(&mut haptic);
-                    }
-                    pending_rotate = None;
-                }
-            }
+            // Process pending rotation if deadline passed
+            process_pending_rotate(&mut state, &mut haptic, latch_threshold, min_volume_delta);
 
             let events = match device.fetch_events() {
                 Ok(events) => events,
@@ -135,10 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         device_path.display(),
                         err
                     );
-                    pending_rotate = None;
-                    latched = true;
-                    skip_next_rotate_event = true;
-                    last_event_at = None;
+                    state.reset();
                     break;
                 }
             };
@@ -146,52 +197,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut saw_event = false;
             for event in events {
                 saw_event = true;
-                last_event_at = Some(Instant::now());
+                state.last_event_at = Some(Instant::now());
+
                 match event.kind() {
                     InputEventKind::RelAxis(RelativeAxisType::REL_DIAL) => {
-                        if clicking {
+                        if state.clicking {
                             continue;
                         }
-                        if skip_next_rotate_event {
-                            skip_next_rotate_event = false;
+                        if state.skip_next_rotate_event {
+                            state.skip_next_rotate_event = false;
                             continue;
                         }
+
                         let now = Instant::now();
-                        match pending_rotate {
-                            Some((value, deadline)) if now >= deadline => {
-                                if latched {
-                                    if value.abs() >= latch_threshold {
-                                        let direction = if value > 0 { "up" } else { "down" };
-                                        println!("diald: volume {} {}", direction, value.abs());
-                                        send_haptic_chunky(&mut haptic);
-                                        latched = false;
-                                    }
-                                } else if value.abs() >= min_volume_delta {
-                                    let direction = if value > 0 { "up" } else { "down" };
-                                    println!("diald: volume {} {}", direction, value.abs());
-                                    send_haptic_chunky(&mut haptic);
-                                }
-                                pending_rotate = Some((event.value(), now + debounce_window));
-                            }
+
+                        // Process any pending rotation that's past deadline before accumulating new value
+                        process_pending_rotate(
+                            &mut state,
+                            &mut haptic,
+                            latch_threshold,
+                            min_volume_delta,
+                        );
+
+                        // Accumulate or start new pending rotation
+                        match state.pending_rotate {
                             Some((value, deadline)) => {
-                                pending_rotate = Some((value + event.value(), deadline));
+                                state.pending_rotate = Some((value + event.value(), deadline));
                             }
                             None => {
-                                pending_rotate = Some((event.value(), now + debounce_window));
+                                state.pending_rotate =
+                                    Some((event.value(), now + debounce_window));
                             }
                         }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
                         if event.value() == 1 {
-                            if !clicking {
-                                clicking = true;
-                                click_started_at = Some(Instant::now());
-                                pending_rotate = None;
+                            if !state.clicking {
+                                state.clicking = true;
+                                state.click_started_at = Some(Instant::now());
+                                state.pending_rotate = None;
                             }
-                        } else if clicking {
+                        } else if state.clicking {
                             println!("diald: click up");
-                            clicking = false;
-                            click_started_at = None;
+                            state.clicking = false;
+                            state.click_started_at = None;
                         }
                     }
                     _ => {}
