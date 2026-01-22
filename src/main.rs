@@ -90,10 +90,9 @@ impl DialState {
     }
 }
 
-fn emit_volume_change(value: i32, haptic: &mut HapticDevice) {
+fn emit_volume_change(value: i32) {
     let direction = if value > 0 { "up" } else { "down" };
     println!("diald: volume {} {}", direction, value.abs());
-    haptic.send_chunky();
 }
 
 fn process_pending_rotate(
@@ -110,11 +109,12 @@ fn process_pending_rotate(
     }
     if state.latched {
         if value.abs() >= latch_threshold {
-            emit_volume_change(value, haptic);
+            emit_volume_change(value);
+            haptic.send_chunky(); // Only vibrate on unlatch
             state.latched = false;
         }
     } else if value.abs() >= min_volume_delta {
-        emit_volume_change(value, haptic);
+        emit_volume_change(value);
     }
     state.pending_rotate = None;
 }
