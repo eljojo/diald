@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let idle_reset = Duration::from_secs(2);
     let click_timeout = Duration::from_secs(2);
     let latch_threshold = 100;
+    let min_volume_delta = 10;
     let mut latched = true;
     let mut skip_next_rotate_event = true;
     let mut last_event_at: Option<Instant> = None;
@@ -86,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("diald: volume {} {}", direction, value.abs());
                             latched = false;
                         }
-                    } else if value != 0 {
+                    } else if value.abs() >= min_volume_delta {
                         let direction = if value > 0 { "up" } else { "down" };
                         println!("diald: volume {} {}", direction, value.abs());
                     }
@@ -132,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         println!("diald: volume {} {}", direction, value.abs());
                                         latched = false;
                                     }
-                                } else if value != 0 {
+                                } else if value.abs() >= min_volume_delta {
                                     let direction = if value > 0 { "up" } else { "down" };
                                     println!("diald: volume {} {}", direction, value.abs());
                                 }
