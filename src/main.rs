@@ -25,10 +25,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_rotate: Option<(i32, Instant)> = None;
     let debounce_window = Duration::from_millis(500);
     let idle_reset = Duration::from_secs(2);
+    let click_timeout = Duration::from_secs(2);
     let latch_threshold = 100;
     let mut latched = true;
     let mut skip_next_rotate_event = true;
     let mut last_event_at: Option<Instant> = None;
+    let mut clicking = false;
+    let mut click_started_at: Option<Instant> = None;
 
     let mut open_error_logged = false;
     loop {
@@ -61,6 +64,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     latched = true;
                     skip_next_rotate_event = true;
                     last_event_at = None;
+                }
+            }
+
+            if clicking {
+                if let Some(started_at) = click_started_at {
+                    if Instant::now().duration_since(started_at) >= click_timeout {
+                        println!("diald: click aborted (timeout)");
+                        clicking = false;
+                        click_started_at = None;
+                        pending_rotate = None;
+                    }
                 }
             }
 
@@ -102,6 +116,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_event_at = Some(Instant::now());
                 match event.kind() {
                     InputEventKind::RelAxis(RelativeAxisType::REL_DIAL) => {
+                        if clicking {
+                            continue;
+                        }
                         if skip_next_rotate_event {
                             skip_next_rotate_event = false;
                             continue;
@@ -130,8 +147,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
-                        let state = if event.value() == 1 { "down" } else { "up" };
-                        println!("diald: click {}", state);
+                        if event.value() == 1 {
+                            if !clicking {
+                                clicking = true;
+                                click_started_at = Some(Instant::now());
+                                pending_rotate = None;
+                            }
+                        } else if clicking {
+                            println!("diald: click up");
+                            clicking = false;
+                            click_started_at = None;
+                        }
                     }
                     _ => {}
                 }
