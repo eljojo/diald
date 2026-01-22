@@ -1,4 +1,6 @@
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,10 +19,38 @@ fn parse_device_arg() -> Option<PathBuf> {
     None
 }
 
+fn open_haptic_device() -> Option<std::fs::File> {
+    let path = env::var("DIALD_HAPTIC_DEV").unwrap_or_else(|_| "/dev/hidraw0".to_string());
+    match OpenOptions::new().write(true).open(&path) {
+        Ok(file) => {
+            println!("diald: opened haptics {}", path);
+            Some(file)
+        }
+        Err(err) => {
+            println!("diald: failed to open haptics {} ({})", path, err);
+            None
+        }
+    }
+}
+
+fn send_haptic_chunky(haptic: &mut Option<std::fs::File>) {
+    let Some(file) = haptic.as_mut() else {
+        return;
+    };
+    // Report ID 1 output: repeat=2, manual=3, retrigger=70 (chunky)
+    let payload = [1u8, 2u8, 3u8, 70u8, 0u8];
+    if let Err(err) = file.write_all(&payload) {
+        println!("diald: haptics write failed ({})", err);
+        *haptic = None;
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device_path = parse_device_arg()
         .or_else(|| env::var_os("DIALD_DEVICE").map(PathBuf::from))
         .ok_or("missing device path; pass --device or set DIALD_DEVICE")?;
+
+    let mut haptic = open_haptic_device();
 
     let mut pending_rotate: Option<(i32, Instant)> = None;
     let debounce_window = Duration::from_millis(500);
@@ -85,11 +115,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if value.abs() >= latch_threshold {
                             let direction = if value > 0 { "up" } else { "down" };
                             println!("diald: volume {} {}", direction, value.abs());
+                            send_haptic_chunky(&mut haptic);
                             latched = false;
                         }
                     } else if value.abs() >= min_volume_delta {
                         let direction = if value > 0 { "up" } else { "down" };
                         println!("diald: volume {} {}", direction, value.abs());
+                        send_haptic_chunky(&mut haptic);
                     }
                     pending_rotate = None;
                 }
@@ -131,11 +163,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if value.abs() >= latch_threshold {
                                         let direction = if value > 0 { "up" } else { "down" };
                                         println!("diald: volume {} {}", direction, value.abs());
+                                        send_haptic_chunky(&mut haptic);
                                         latched = false;
                                     }
                                 } else if value.abs() >= min_volume_delta {
                                     let direction = if value > 0 { "up" } else { "down" };
                                     println!("diald: volume {} {}", direction, value.abs());
+                                    send_haptic_chunky(&mut haptic);
                                 }
                                 pending_rotate = Some((event.value(), now + debounce_window));
                             }
