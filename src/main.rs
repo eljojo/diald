@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_rotate: Option<(i32, Instant)> = None;
     let debounce_window = Duration::from_millis(500);
     let idle_reset = Duration::from_secs(2);
-    let latch_threshold = 30;
+    let latch_threshold = 100;
     let mut latched = true;
     let mut skip_next_rotate_event = true;
     let mut last_event_at: Option<Instant> = None;
