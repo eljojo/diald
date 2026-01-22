@@ -101,9 +101,14 @@
                 ExecStart = "${cfg.package}/bin/diald --device ${cfg.device}";
                 Restart = "on-failure";
                 DynamicUser = true;
-                SupplementaryGroups = [ "input" ];
+                SupplementaryGroups = [ "input" "hidraw" ];
               };
             };
+
+            services.udev.extraRules = ''
+              # Allow diald (input group) to access Surface Dial haptics on hidraw.
+              SUBSYSTEM=="hidraw", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="091b", MODE="0660", GROUP="input"
+            '';
           };
         };
     };
