@@ -107,7 +107,7 @@
 
             services.udev.extraRules = ''
               # Allow diald (input group) to access Surface Dial haptics on hidraw.
-              SUBSYSTEM=="hidraw", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="091b", MODE="0660", GROUP="input"
+              KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="091b", MODE="0660", GROUP="input"
             '';
           };
         };
