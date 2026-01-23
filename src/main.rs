@@ -156,6 +156,7 @@ struct DialState {
     last_raw_direction: i32,      // -1, 0, or 1
     consistent_direction_count: u32,  // consecutive events in same direction
     pre_backlash_direction: i32,  // direction before entering backlash
+    backlash_accumulator: i32,    // buffered input during backlash
 }
 
 const BACKLASH_THRESHOLD: u32 = 25;  // events needed to exit backlash mode
@@ -174,6 +175,7 @@ impl DialState {
             last_raw_direction: 0,
             consistent_direction_count: 0,
             pre_backlash_direction: 0,
+            backlash_accumulator: 0,
         }
     }
 
@@ -190,6 +192,7 @@ impl DialState {
         self.last_raw_direction = 0;
         self.consistent_direction_count = 0;
         self.pre_backlash_direction = 0;
+        self.backlash_accumulator = 0;
     }
 }
 
@@ -435,8 +438,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.mode = DialMode::Backlash;
                             state.consistent_direction_count = 1;
                             state.raw_accumulator = 0;  // discard accumulated movement
+                            state.backlash_accumulator = event.value();  // start buffering
                         } else if direction == state.last_raw_direction {
                             state.consistent_direction_count += 1;
+                            if state.mode == DialMode::Backlash {
+                                state.backlash_accumulator += event.value();  // keep buffering
+                            }
                         }
                         state.last_raw_direction = direction;
 
@@ -448,19 +455,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 log!("diald: canceling backlash (returned to original direction)");
                                 state.mode = DialMode::Active;
-                                // no buzz - quietly resume
+                                state.raw_accumulator = state.backlash_accumulator;  // transfer buffered input
+                                // no buzz - quietly resume, don't add event again (already buffered)
                             } else if state.consistent_direction_count >= BACKLASH_THRESHOLD {
                                 log!("diald: exiting backlash (stable for {} events)", state.consistent_direction_count);
                                 state.mode = DialMode::Active;
+                                state.raw_accumulator = state.backlash_accumulator;  // transfer buffered input
                                 haptic.send_chunky();
+                                // don't add event again (already buffered)
                             } else {
                                 continue;  // don't process events while in backlash
                             }
+                        } else {
+                            // Normal mode: accumulate raw input
+                            // 40 raw = 1 volume unit (400 raw = 10 volume)
+                            state.raw_accumulator += event.value();
                         }
-
-                        // Accumulate raw input, convert to volume when we have enough
-                        // 40 raw = 1 volume unit (400 raw = 10 volume)
-                        state.raw_accumulator += event.value();
 
                         let volume_delta = state.raw_accumulator / 40;
                         if volume_delta != 0 {
