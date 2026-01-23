@@ -418,6 +418,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for event in events {
                 if state.mode == DialMode::Idle {
                     state.set_mode(DialMode::Active);
+                    haptic.send_chunky();
                 }
                 state.last_event_at = Some(Instant::now());
 
