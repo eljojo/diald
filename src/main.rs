@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -145,6 +146,55 @@ impl DialMode {
     }
 }
 
+/// Delay buffer for backlash compensation.
+/// Events are held for `lookahead` events before being released, giving us time
+/// to detect direction changes before committing potentially-spurious events.
+struct DelayBuffer {
+    events: VecDeque<i32>,
+    lookahead: usize,
+}
+
+impl DelayBuffer {
+    fn new(lookahead: usize) -> Self {
+        Self {
+            events: VecDeque::with_capacity(lookahead + 1),
+            lookahead,
+        }
+    }
+
+    /// Push an event. Returns the oldest event if buffer exceeds lookahead size.
+    fn push(&mut self, value: i32) -> Option<i32> {
+        self.events.push_back(value);
+        if self.events.len() > self.lookahead {
+            self.events.pop_front()
+        } else {
+            None
+        }
+    }
+
+    /// Drain buffer, keeping only events matching the given direction.
+    /// Returns the sum of matching events. Used when exiting confirmed backlash.
+    fn drain_matching(&mut self, direction: i32) -> i32 {
+        let sum = self.events.iter()
+            .filter(|v| v.signum() == direction)
+            .sum();
+        self.events.clear();
+        sum
+    }
+
+    /// Drain buffer, returning sum of all events.
+    /// Used when cancelling false-positive backlash.
+    fn drain_all(&mut self) -> i32 {
+        let sum = self.events.iter().sum();
+        self.events.clear();
+        sum
+    }
+
+    fn clear(&mut self) {
+        self.events.clear();
+    }
+}
+
 struct DialState {
     mode: DialMode,
     last_event_at: Option<Instant>,
@@ -153,14 +203,13 @@ struct DialState {
     last_print_at: Option<Instant>,
     last_printed_volume: i32,
     clicking: bool,
-    last_raw_direction: i32,      // -1, 0, or 1
-    consistent_direction_count: u32,  // consecutive events in same direction
-    pre_backlash_direction: i32,  // direction before entering backlash
-    backlash_accumulator: i32,    // buffered input during backlash
+    last_raw_direction: i32,         // -1, 0, or 1
+    consistent_direction_count: u32, // consecutive events in same direction
+    pre_backlash_direction: i32,     // direction before entering backlash
 }
 
-const BACKLASH_THRESHOLD: u32 = 50;  // events needed to exit backlash mode
-const BACKLASH_CANCEL_THRESHOLD: u32 = BACKLASH_THRESHOLD / 5;  // events to cancel false-positive backlash
+const BACKLASH_THRESHOLD: usize = 50; // events needed to exit backlash mode (also delay buffer size)
+const BACKLASH_CANCEL_THRESHOLD: u32 = (BACKLASH_THRESHOLD / 5) as u32; // events to cancel false-positive backlash
 
 impl DialState {
     fn new() -> Self {
@@ -175,7 +224,6 @@ impl DialState {
             last_raw_direction: 0,
             consistent_direction_count: 0,
             pre_backlash_direction: 0,
-            backlash_accumulator: 0,
         }
     }
 
@@ -192,7 +240,6 @@ impl DialState {
         self.last_raw_direction = 0;
         self.consistent_direction_count = 0;
         self.pre_backlash_direction = 0;
-        self.backlash_accumulator = 0;
     }
 }
 
@@ -323,6 +370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut haptic = HapticDevice::new(device_path.clone());
     let mut state = DialState::new();
+    let mut delay_buffer = DelayBuffer::new(BACKLASH_THRESHOLD);
     let mut batcher = EventBatcher::new(Duration::from_millis(250));
     let mut mqtt = spawn_mqtt();
 
@@ -346,6 +394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log!("diald: name={:?}", dev.name());
                     open_error_logged = false;
                     state.reset_to_idle();
+                    delay_buffer.clear();
                     haptic.reconnect();
                     break dev;
                 }
@@ -398,6 +447,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(last_event) = state.last_event_at {
                     if Instant::now().duration_since(last_event) >= idle_timeout {
                         state.reset_to_idle();
+                        delay_buffer.clear();
                     }
                 }
             }
@@ -428,56 +478,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
-                        // Backlash state machine: track direction changes at raw level
+                        // Track direction for backlash detection
                         let direction = event.value().signum();
-                        if state.last_raw_direction != 0 && direction != state.last_raw_direction {
+                        let direction_changed = state.last_raw_direction != 0
+                            && direction != state.last_raw_direction;
+
+                        if direction_changed {
                             // Direction changed - enter backlash mode
                             if state.mode != DialMode::Backlash {
-                                log!("diald: entering backlash (direction {} -> {})", state.last_raw_direction, direction);
+                                log!(
+                                    "diald: entering backlash (direction {} -> {})",
+                                    state.last_raw_direction,
+                                    direction
+                                );
                                 state.pre_backlash_direction = state.last_raw_direction;
+                                state.mode = DialMode::Backlash;
                             }
-                            state.mode = DialMode::Backlash;
                             state.consistent_direction_count = 1;
-                            state.raw_accumulator = 0;  // discard accumulated movement
-                            state.backlash_accumulator = event.value();  // start buffering
                         } else if direction == state.last_raw_direction {
                             state.consistent_direction_count += 1;
-                            if state.mode == DialMode::Backlash {
-                                state.backlash_accumulator += event.value();  // keep buffering
-                            }
                         }
                         state.last_raw_direction = direction;
 
-                        // Exit backlash mode once direction stabilizes
+                        // Push event to delay buffer - returns aged-out event (if any)
+                        let delayed = delay_buffer.push(event.value());
+
+                        // Handle based on mode
                         if state.mode == DialMode::Backlash {
-                            // Cancel backlash if we quickly return to original direction (false positive)
+                            // In backlash mode: don't commit delayed events, wait for stability
+
+                            // Check for exit conditions
                             if direction == state.pre_backlash_direction
                                 && state.consistent_direction_count >= BACKLASH_CANCEL_THRESHOLD
                             {
-                                log!("diald: canceling backlash (returned to original direction)");
+                                // False positive - cancel backlash, release ALL buffered events
+                                let buffered = delay_buffer.drain_all();
+                                log!("diald: canceling backlash (buffered={})", buffered);
+                                state.raw_accumulator += buffered;
                                 state.mode = DialMode::Active;
-                                state.raw_accumulator = state.backlash_accumulator;  // transfer buffered input
-                                // no buzz - quietly resume, don't add event again (already buffered)
-                            } else if state.consistent_direction_count >= BACKLASH_THRESHOLD {
-                                log!("diald: exiting backlash (stable for {} events)", state.consistent_direction_count);
+                            } else if state.consistent_direction_count >= BACKLASH_THRESHOLD as u32 {
+                                // Confirmed direction change - release only matching events
+                                let buffered = delay_buffer.drain_matching(direction);
+                                log!(
+                                    "diald: exiting backlash (stable for {} events, buffered={})",
+                                    state.consistent_direction_count,
+                                    buffered
+                                );
+                                state.raw_accumulator += buffered;
                                 state.mode = DialMode::Active;
-                                state.raw_accumulator = state.backlash_accumulator;  // transfer buffered input
                                 haptic.send_chunky();
-                                // don't add event again (already buffered)
-                            } else {
-                                continue;  // don't process events while in backlash
                             }
+                            // else: stay in backlash mode, continue buffering
                         } else {
-                            // Normal mode: accumulate raw input
+                            // Normal mode: commit delayed events as they age out
                             // 40 raw = 1 volume unit (400 raw = 10 volume)
-                            state.raw_accumulator += event.value();
+                            if let Some(value) = delayed {
+                                state.raw_accumulator += value;
+                            }
                         }
 
                         let volume_delta = state.raw_accumulator / 40;
                         if volume_delta != 0 {
                             state.raw_accumulator -= volume_delta * 40;
 
-                            let old_volume = state.volume;
                             let unclamped = state.volume + volume_delta as f64;
                             state.volume = unclamped.clamp(0.0, 100.0);
 
@@ -486,13 +549,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 haptic.send_chunky();
                             }
 
-                            // Buzz when crossing multiples of 10
-                            // let old_ten = (old_volume / 10.0).floor() as i32;
-                            // let new_ten = (state.volume / 10.0).floor() as i32;
-                            // if old_ten != new_ten {
-                            //     haptic.send_chunky();
-                            // }
-
                             // Check if we should print
                             let current_volume = state.volume.round() as i32;
                             let old_tens = state.last_printed_volume / 10;
@@ -500,7 +556,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let crossed_ten = old_tens != new_tens;
 
                             let now = Instant::now();
-                            let time_to_print = state.last_print_at
+                            let time_to_print = state
+                                .last_print_at
                                 .map(|t| now.duration_since(t) >= Duration::from_millis(250))
                                 .unwrap_or(true);
 

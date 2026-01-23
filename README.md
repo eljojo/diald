@@ -108,12 +108,19 @@ This provides a smooth, continuous feel rather than discrete steps.
 
 Rotary encoders suffer from mechanical backlash - when you reverse direction, the first few signals can be spurious or in the wrong direction. This is especially noticeable on the Surface Dial's sensitive capacitive encoder.
 
+### The Problem
+
+When you reverse direction, the hardware sends a burst of wrong-direction events *before* we can detect the change. By the time software sees a direction change, it has already committed spurious events.
+
+### The Solution: Delay Buffer
+
+Events are held in a **delay buffer** (50 events) before being committed. This acts like a TV broadcast delay - giving us time to detect direction changes and filter backlash before events are processed.
+
 When a direction change is detected at the raw event level, the system enters **Backlash mode**:
 
 1. **Enter Backlash**: When an event's direction differs from the previous event's direction
-2. **Discard old accumulator**: Any partial movement in the old direction is cleared
-3. **Buffer new input**: Raw events are buffered in a separate accumulator
-4. **Wait for stability**: Count consecutive events in the same direction
+2. **Hold all events**: Events stay in the buffer and are not committed
+3. **Wait for stability**: Count consecutive events in the same direction
 
 ## Exiting Backlash Mode
 
@@ -121,20 +128,19 @@ There are two ways to exit Backlash mode:
 
 ### Confirmed direction change (threshold: 50 events)
 If 50 consecutive events occur in the new direction, it's a real direction change:
-- Transfer buffered input to the main accumulator
+- Drain buffer, keeping only events matching the new direction (discard backlash)
 - Buzz to confirm the direction change
 - Resume Active mode
 
 ### False positive cancellation (threshold: 10 events)
 If 10 consecutive events occur in the *original* direction (before backlash), it was a false trigger:
-- Transfer buffered input to the main accumulator
+- Drain buffer, keeping all events (none were backlash)
 - Resume Active mode quietly (no buzz)
-- No movement is lost
 
 This "double anti-backlash" catches both real encoder backlash AND accidental micro-movements from the user's finger.
 
 ## Input Preservation
 
-During Backlash mode, raw input isn't discarded - it's buffered. When exiting Backlash (either way), the buffered input is transferred to the main accumulator. This ensures no intentional movement is lost, only the spurious direction-change artifacts are filtered out.
+During normal operation, events flow through the delay buffer with a 50-event latency. This latency is imperceptible to users but provides a critical window for detecting and filtering backlash before events are committed. When exiting Backlash mode, legitimate movement is preserved while spurious direction-change artifacts are filtered out.
 
 </details>
