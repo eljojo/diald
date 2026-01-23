@@ -83,6 +83,11 @@
               default = null;
               description = "Input device path (e.g. /dev/input/event2).";
             };
+            environmentFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              description = "Path to environment file with MQTT_HOST, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD.";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -102,6 +107,8 @@
                 Restart = "on-failure";
                 DynamicUser = true;
                 SupplementaryGroups = [ "input" ];
+              } // lib.optionalAttrs (cfg.environmentFile != null) {
+                EnvironmentFile = cfg.environmentFile;
               };
             };
 

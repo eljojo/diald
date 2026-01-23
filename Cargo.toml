@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 evdev = "0.12"
 libc = "0.2"
+rumqttc = "0.24"

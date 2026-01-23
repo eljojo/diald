@@ -4,10 +4,12 @@ use std::io::{ErrorKind, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use evdev::{Device, InputEventKind, Key, RelativeAxisType};
+use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
 
 static LOGGING_ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -36,9 +38,7 @@ fn parse_device_arg() -> Option<PathBuf> {
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--device" {
-            if let Some(path) = args.next() {
-                return Some(PathBuf::from(path));
-            }
+            return args.next().map(PathBuf::from);
         }
     }
     None
@@ -226,6 +226,57 @@ fn emit_batch(events: Vec<&'static str>) {
     }
 }
 
+struct MqttHandle {
+    client: Client,
+    incoming_rx: Receiver<i32>,
+}
+
+fn spawn_mqtt() -> Option<MqttHandle> {
+    let host = env::var("MQTT_HOST").unwrap_or_else(|_| "localhost".to_string());
+    let port: u16 = env::var("MQTT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(1883);
+    let username = env::var("MQTT_USERNAME").ok();
+    let password = env::var("MQTT_PASSWORD").ok();
+
+    let mut opts = MqttOptions::new("diald", &host, port);
+    opts.set_keep_alive(Duration::from_secs(30));
+
+    if let (Some(user), Some(pass)) = (&username, &password) {
+        opts.set_credentials(user, pass);
+    }
+
+    let (client, mut connection) = Client::new(opts, 10);
+
+    if let Err(err) = client.subscribe("home/diald/volume/set", QoS::AtLeastOnce) {
+        log!("diald: mqtt subscribe failed ({})", err);
+        return None;
+    }
+
+    let (tx, rx): (Sender<i32>, Receiver<i32>) = mpsc::channel();
+
+    thread::spawn(move || {
+        for event in connection.iter() {
+            match event {
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    if let Ok(payload) = std::str::from_utf8(&publish.payload) {
+                        if let Ok(volume) = payload.trim().parse::<i32>() {
+                            let _ = tx.send(volume);
+                        }
+                    }
+                }
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    log!("diald: mqtt connected to {}:{}", host, port);
+                }
+                Err(err) => {
+                    log!("diald: mqtt error ({})", err);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    Some(MqttHandle { client, incoming_rx: rx })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device_path = parse_device_arg()
         .or_else(|| env::var_os("DIALD_DEVICE").map(PathBuf::from))
@@ -234,6 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut haptic = HapticDevice::new(device_path.clone());
     let mut state = DialState::new();
     let mut batcher = EventBatcher::new(Duration::from_millis(250));
+    let mut mqtt = spawn_mqtt();
 
     // Disable logging after 30 minutes to preserve SD card
     thread::spawn(|| {
@@ -278,6 +330,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Flush batched events if deadline passed
             if let Some(events) = batcher.try_flush() {
                 emit_batch(events);
+            }
+
+            // Check for incoming MQTT volume updates (only when idle)
+            if let Some(ref handle) = mqtt {
+                loop {
+                    match handle.incoming_rx.try_recv() {
+                        Ok(volume) => {
+                            if state.mode == DialMode::Idle {
+                                let clamped = (volume as f64).clamp(0.0, 100.0);
+                                state.volume = clamped;
+                                state.last_printed_volume = clamped.round() as i32;
+                                log!("diald: mqtt volume -> {}", state.last_printed_volume);
+                            }
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            log!("diald: mqtt disconnected");
+                            mqtt = None;
+                            break;
+                        }
+                    }
+                }
             }
 
             // Transition to idle after timeout
@@ -355,6 +429,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 log!("diald: volume {}", current_volume);
                                 state.last_print_at = Some(now);
                                 state.last_printed_volume = current_volume;
+
+                                // Publish to MQTT
+                                if let Some(ref handle) = mqtt {
+                                    let _ = handle.client.publish(
+                                        "home/diald/volume",
+                                        QoS::AtLeastOnce,
+                                        false,
+                                        current_volume.to_string(),
+                                    );
+                                }
                             }
                         }
                     }
