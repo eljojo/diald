@@ -152,7 +152,7 @@ struct DialState {
     last_printed_volume: i32,
     clicking: bool,
     last_direction: i32,  // -1, 0, or 1
-    direction_changed: bool,
+    backlash_until: Option<Instant>,  // discard old-direction events until this time
 }
 
 impl DialState {
@@ -166,7 +166,7 @@ impl DialState {
             last_printed_volume: 50,
             clicking: false,
             last_direction: 0,
-            direction_changed: false,
+            backlash_until: None,
         }
     }
 
@@ -181,7 +181,7 @@ impl DialState {
         self.set_mode(DialMode::Idle);
         self.raw_accumulator = 0;
         self.last_direction = 0;
-        self.direction_changed = false;
+        self.backlash_until = None;
     }
 }
 
@@ -402,17 +402,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
-                        // Detect direction change (backlash compensation)
+                        // Backlash compensation: when direction changes, ignore events
+                        // in the OLD direction for 150ms
                         let direction = event.value().signum();
+                        let now = Instant::now();
+
                         if state.last_direction != 0 && direction != state.last_direction {
-                            // Direction changed - discard this event if we haven't already
-                            if !state.direction_changed {
-                                state.direction_changed = true;
-                                state.last_direction = direction;
+                            // Direction changed - start backlash window
+                            state.backlash_until = Some(now + Duration::from_millis(150));
+                            state.last_direction = direction;
+                        }
+
+                        // During backlash window, discard events in the old direction
+                        if let Some(until) = state.backlash_until {
+                            if now < until && direction != state.last_direction {
                                 continue;
                             }
+                            if now >= until {
+                                state.backlash_until = None;
+                            }
                         }
-                        state.direction_changed = false;
+
                         state.last_direction = direction;
 
                         // Accumulate raw input, convert to volume when we have enough
