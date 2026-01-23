@@ -254,6 +254,7 @@ fn spawn_mqtt() -> Option<MqttHandle> {
     let (tx, rx): (Sender<i32>, Receiver<i32>) = mpsc::channel();
 
     thread::spawn(move || {
+        let mut last_error_log: Option<Instant> = None;
         for event in connection.iter() {
             match event {
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
@@ -267,7 +268,14 @@ fn spawn_mqtt() -> Option<MqttHandle> {
                     log!("diald: mqtt connected to {}:{}", host, port);
                 }
                 Err(err) => {
-                    log!("diald: mqtt error ({})", err);
+                    let now = Instant::now();
+                    let should_log = last_error_log
+                        .map(|t| now.duration_since(t) >= Duration::from_secs(10))
+                        .unwrap_or(true);
+                    if should_log {
+                        log!("diald: mqtt error ({})", err);
+                        last_error_log = Some(now);
+                    }
                 }
                 _ => {}
             }
