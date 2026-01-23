@@ -145,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut open_error_logged = false;
     loop {
-        let device = loop {
+        let mut device = loop {
             match Device::open(&device_path) {
                 Ok(device) => {
                     println!("diald: opened {}", device_path.display());
