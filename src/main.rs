@@ -331,10 +331,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 haptic.send_chunky();
                             }
 
-                            // Buzz when crossing multiples of 20
-                            let old_twenty = (old_volume / 20.0).floor() as i32;
-                            let new_twenty = (state.volume / 20.0).floor() as i32;
-                            if old_twenty != new_twenty {
+                            // Buzz when crossing multiples of 10
+                            let old_ten = (old_volume / 10.0).floor() as i32;
+                            let new_ten = (state.volume / 10.0).floor() as i32;
+                            if old_ten != new_ten {
                                 haptic.send_chunky();
                             }
 
