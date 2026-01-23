@@ -135,7 +135,9 @@ impl DialMode {
 struct DialState {
     mode: DialMode,
     last_event_at: Option<Instant>,
+    last_dial_at: Option<Instant>,
     accumulator: i32,
+    smoothed_speed: f64,
     clicking: bool,
 }
 
@@ -144,7 +146,9 @@ impl DialState {
         Self {
             mode: DialMode::Idle,
             last_event_at: None,
+            last_dial_at: None,
             accumulator: 0,
+            smoothed_speed: 1.0,
             clicking: false,
         }
     }
@@ -159,6 +163,8 @@ impl DialState {
     fn reset_to_idle(&mut self) {
         self.set_mode(DialMode::Idle);
         self.accumulator = 0;
+        self.smoothed_speed = 1.0;
+        self.last_dial_at = None;
     }
 }
 
@@ -219,7 +225,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut batcher = EventBatcher::new(Duration::from_millis(250));
 
     let idle_timeout = Duration::from_secs(30);
-    let notch_threshold = 400;
 
     println!("diald: state -> disconnected");
 
@@ -291,6 +296,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if state.clicking {
                             continue;
                         }
+
+                        // Calculate speed and update smoothed average
+                        let now = Instant::now();
+                        let speed = if let Some(last) = state.last_dial_at {
+                            let elapsed_ms = now.duration_since(last).as_secs_f64() * 1000.0;
+                            if elapsed_ms > 0.0 {
+                                (event.value().abs() as f64) / elapsed_ms
+                            } else {
+                                state.smoothed_speed
+                            }
+                        } else {
+                            1.0
+                        };
+                        state.last_dial_at = Some(now);
+
+                        let alpha = 0.3;
+                        state.smoothed_speed = alpha * speed + (1.0 - alpha) * state.smoothed_speed;
+
+                        // Map speed to threshold: slow → low threshold, fast → high threshold
+                        let notch_threshold = ((state.smoothed_speed * 350.0) + 100.0).clamp(100.0, 800.0) as i32;
 
                         state.accumulator += event.value();
 
