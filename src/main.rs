@@ -159,7 +159,7 @@ struct DialState {
     backlash_accumulator: i32,    // buffered input during backlash
 }
 
-const BACKLASH_THRESHOLD: u32 = 30;  // events needed to exit backlash mode
+const BACKLASH_THRESHOLD: u32 = 50;  // events needed to exit backlash mode
 const BACKLASH_CANCEL_THRESHOLD: u32 = BACKLASH_THRESHOLD / 5;  // events to cancel false-positive backlash
 
 impl DialState {
