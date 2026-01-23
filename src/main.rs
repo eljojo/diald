@@ -146,9 +146,10 @@ impl DialMode {
 struct DialState {
     mode: DialMode,
     last_event_at: Option<Instant>,
-    last_dial_at: Option<Instant>,
-    accumulator: i32,
-    smoothed_magnitude: f64,
+    volume: f64,
+    raw_accumulator: i32,
+    last_print_at: Option<Instant>,
+    last_printed_volume: i32,
     clicking: bool,
 }
 
@@ -157,9 +158,10 @@ impl DialState {
         Self {
             mode: DialMode::Idle,
             last_event_at: None,
-            last_dial_at: None,
-            accumulator: 0,
-            smoothed_magnitude: 4.0,
+            volume: 50.0,
+            raw_accumulator: 0,
+            last_print_at: None,
+            last_printed_volume: 50,
             clicking: false,
         }
     }
@@ -173,9 +175,7 @@ impl DialState {
 
     fn reset_to_idle(&mut self) {
         self.set_mode(DialMode::Idle);
-        self.accumulator = 0;
-        self.smoothed_magnitude = 4.0;
-        self.last_dial_at = None;
+        self.raw_accumulator = 0;
     }
 }
 
@@ -314,43 +314,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
-                        // Reset smoothed to neutral after a pause (allows entering precision mode)
-                        let now = Instant::now();
-                        if let Some(last) = state.last_dial_at {
-                            if now.duration_since(last) > Duration::from_millis(500) {
-                                state.smoothed_magnitude = 4.0;
+                        // Accumulate raw input, convert to volume when we have enough
+                        // 40 raw = 1 volume unit (400 raw = 10 volume)
+                        state.raw_accumulator += event.value();
+
+                        let volume_delta = state.raw_accumulator / 40;
+                        if volume_delta != 0 {
+                            state.raw_accumulator -= volume_delta * 40;
+
+                            let old_volume = state.volume;
+                            let unclamped = state.volume + volume_delta as f64;
+                            state.volume = unclamped.clamp(0.0, 100.0);
+
+                            // Buzz at boundaries (trying to go past 0 or 100)
+                            if unclamped < 0.0 || unclamped > 100.0 {
+                                haptic.send_chunky();
                             }
-                        }
-                        state.last_dial_at = Some(now);
 
-                        // Update smoothed magnitude (small = precise, large = fast)
-                        // Asymmetric: fast to rise, slow to fall (resist accidental precision mode)
-                        let magnitude = event.value().abs() as f64;
-                        let alpha = if magnitude > state.smoothed_magnitude { 0.3 } else { 0.1 };
-                        state.smoothed_magnitude = alpha * magnitude + (1.0 - alpha) * state.smoothed_magnitude;
+                            // Buzz when crossing multiples of 20
+                            let old_twenty = (old_volume / 20.0).floor() as i32;
+                            let new_twenty = (state.volume / 20.0).floor() as i32;
+                            if old_twenty != new_twenty {
+                                haptic.send_chunky();
+                            }
 
-                        // Piecewise threshold: precision range has steep slope, fast range gentle
-                        let notch_threshold = if state.smoothed_magnitude < 4.0 {
-                            // 1.0 → 200, 4.0 → 400
-                            (200.0 + (state.smoothed_magnitude - 1.0) * (200.0 / 3.0)).clamp(200.0, 400.0) as i32
-                        } else {
-                            // 4.0 → 400, 15.0 → 600
-                            (400.0 + (state.smoothed_magnitude - 4.0) * (200.0 / 11.0)).clamp(400.0, 600.0) as i32
-                        };
+                            // Check if we should print
+                            let current_volume = state.volume.round() as i32;
+                            let old_tens = state.last_printed_volume / 10;
+                            let new_tens = current_volume / 10;
+                            let crossed_ten = old_tens != new_tens;
 
-                        state.accumulator += event.value();
+                            let now = Instant::now();
+                            let time_to_print = state.last_print_at
+                                .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                                .unwrap_or(true);
 
-                        while state.accumulator >= notch_threshold {
-                            state.accumulator -= notch_threshold;
-                            batcher.push("volume up");
-                            haptic.send_chunky();
-                            log!("diald: notch threshold={} smoothed={:.1}", notch_threshold, state.smoothed_magnitude);
-                        }
-                        while state.accumulator <= -notch_threshold {
-                            state.accumulator += notch_threshold;
-                            batcher.push("volume down");
-                            haptic.send_chunky();
-                            log!("diald: notch threshold={} smoothed={:.1}", notch_threshold, state.smoothed_magnitude);
+                            let volume_changed = current_volume != state.last_printed_volume;
+
+                            if crossed_ten || (volume_changed && time_to_print) {
+                                log!("diald: volume {}", current_volume);
+                                state.last_print_at = Some(now);
+                                state.last_printed_volume = current_volume;
+                            }
                         }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
