@@ -219,7 +219,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut batcher = EventBatcher::new(Duration::from_millis(250));
 
     let idle_timeout = Duration::from_secs(30);
-    let notch_threshold = 100;
+    let notch_thresholds = [100, 200, 300, 400, 500];
+    let mut notch_index = 0;
+    let mut notch_threshold = notch_thresholds[notch_index];
 
     println!("diald: state -> disconnected");
 
@@ -281,10 +283,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             for event in events {
-                // Any event transitions from Idle to Active (with vibration)
                 if state.mode == DialMode::Idle {
                     state.set_mode(DialMode::Active);
-                    haptic.send_chunky();
                 }
                 state.last_event_at = Some(Instant::now());
 
@@ -299,18 +299,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         while state.accumulator >= notch_threshold {
                             state.accumulator -= notch_threshold;
                             batcher.push("volume up");
+                            haptic.send_chunky();
                         }
                         while state.accumulator <= -notch_threshold {
                             state.accumulator += notch_threshold;
                             batcher.push("volume down");
+                            haptic.send_chunky();
                         }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
                         if event.value() == 1 {
                             state.clicking = true;
                         } else if state.clicking {
-                            batcher.push("click");
                             state.clicking = false;
+                            notch_index = (notch_index + 1) % notch_thresholds.len();
+                            notch_threshold = notch_thresholds[notch_index];
+                            println!("diald: notch_threshold={}", notch_threshold);
                         }
                     }
                     _ => {}
