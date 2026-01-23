@@ -219,9 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut batcher = EventBatcher::new(Duration::from_millis(250));
 
     let idle_timeout = Duration::from_secs(30);
-    let notch_thresholds = [100, 200, 300, 400, 500];
-    let mut notch_index = 0;
-    let mut notch_threshold = notch_thresholds[notch_index];
+    let notch_threshold = 400;
 
     println!("diald: state -> disconnected");
 
@@ -312,9 +310,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.clicking = true;
                         } else if state.clicking {
                             state.clicking = false;
-                            notch_index = (notch_index + 1) % notch_thresholds.len();
-                            notch_threshold = notch_thresholds[notch_index];
-                            println!("diald: notch_threshold={}", notch_threshold);
+                            batcher.push("click");
                         }
                     }
                     _ => {}
