@@ -334,8 +334,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // 1.0 → 200, 4.0 → 400
                             (200.0 + (state.smoothed_magnitude - 1.0) * (200.0 / 3.0)).clamp(200.0, 400.0) as i32
                         } else {
-                            // 4.0 → 400, 24.0 → 600
-                            (400.0 + (state.smoothed_magnitude - 4.0) * 10.0).clamp(400.0, 600.0) as i32
+                            // 4.0 → 400, 15.0 → 600
+                            (400.0 + (state.smoothed_magnitude - 4.0) * (200.0 / 11.0)).clamp(400.0, 600.0) as i32
                         };
 
                         state.accumulator += event.value();
