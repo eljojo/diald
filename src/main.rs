@@ -299,8 +299,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let alpha = 0.3;
                         state.smoothed_magnitude = alpha * magnitude + (1.0 - alpha) * state.smoothed_magnitude;
 
-                        // Map magnitude to threshold: small magnitude → 200, large → 400
-                        let notch_threshold = ((state.smoothed_magnitude * 10.0) + 200.0).clamp(200.0, 400.0) as i32;
+                        // Map magnitude to threshold: small magnitude → 400, large → 600
+                        let notch_threshold = ((state.smoothed_magnitude * 10.0) + 400.0).clamp(400.0, 600.0) as i32;
 
                         state.accumulator += event.value();
 
@@ -308,11 +308,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.accumulator -= notch_threshold;
                             batcher.push("volume up");
                             haptic.send_chunky();
+                            println!("diald: notch_threshold={}", notch_threshold);
                         }
                         while state.accumulator <= -notch_threshold {
                             state.accumulator += notch_threshold;
                             batcher.push("volume down");
                             haptic.send_chunky();
+                            println!("diald: notch_threshold={}", notch_threshold);
                         }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
