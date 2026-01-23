@@ -146,7 +146,7 @@ impl DialState {
             mode: DialMode::Idle,
             last_event_at: None,
             accumulator: 0,
-            smoothed_magnitude: 20.0,
+            smoothed_magnitude: 2.0,
             clicking: false,
         }
     }
@@ -161,7 +161,7 @@ impl DialState {
     fn reset_to_idle(&mut self) {
         self.set_mode(DialMode::Idle);
         self.accumulator = 0;
-        self.smoothed_magnitude = 20.0;
+        self.smoothed_magnitude = 2.0;
     }
 }
 
@@ -296,12 +296,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Update smoothed magnitude (small = precise, large = fast)
                         let magnitude = event.value().abs() as f64;
-                        println!("diald: magnitude={} smoothed={:.1}", magnitude, state.smoothed_magnitude);
                         let alpha = 0.3;
                         state.smoothed_magnitude = alpha * magnitude + (1.0 - alpha) * state.smoothed_magnitude;
 
-                        // Map magnitude to threshold: small magnitude → 400, large → 600
-                        let notch_threshold = ((state.smoothed_magnitude * 10.0) + 400.0).clamp(400.0, 600.0) as i32;
+                        // Piecewise threshold: precision range has steep slope, fast range gentle
+                        let notch_threshold = if state.smoothed_magnitude < 2.0 {
+                            // 1.0 → 200, 2.0 → 400
+                            (200.0 + (state.smoothed_magnitude - 1.0) * 200.0).clamp(200.0, 400.0) as i32
+                        } else {
+                            // 2.0 → 400, 22.0 → 600
+                            (400.0 + (state.smoothed_magnitude - 2.0) * 10.0).clamp(400.0, 600.0) as i32
+                        };
 
                         state.accumulator += event.value();
 
@@ -309,13 +314,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.accumulator -= notch_threshold;
                             batcher.push("volume up");
                             haptic.send_chunky();
-                            println!("diald: notch_threshold={}", notch_threshold);
+                            println!("diald: notch threshold={} smoothed={:.1}", notch_threshold, state.smoothed_magnitude);
                         }
                         while state.accumulator <= -notch_threshold {
                             state.accumulator += notch_threshold;
                             batcher.push("volume down");
                             haptic.send_chunky();
-                            println!("diald: notch_threshold={}", notch_threshold);
+                            println!("diald: notch threshold={} smoothed={:.1}", notch_threshold, state.smoothed_magnitude);
                         }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
