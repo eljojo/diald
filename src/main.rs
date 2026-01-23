@@ -1,11 +1,25 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use evdev::{Device, InputEventKind, Key, RelativeAxisType};
+
+fn set_nonblock(device: &Device) -> std::io::Result<()> {
+    let fd = device.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 fn parse_device_arg() -> Option<PathBuf> {
     let mut args = env::args().skip(1);
@@ -103,10 +117,19 @@ impl HapticDevice {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum DialMode {
     Idle,
     Active,
+}
+
+impl DialMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DialMode::Idle => "idle",
+            DialMode::Active => "active",
+        }
+    }
 }
 
 struct DialState {
@@ -126,9 +149,63 @@ impl DialState {
         }
     }
 
+    fn set_mode(&mut self, mode: DialMode) {
+        if self.mode != mode {
+            println!("diald: state -> {}", mode.as_str());
+            self.mode = mode;
+        }
+    }
+
     fn reset_to_idle(&mut self) {
-        self.mode = DialMode::Idle;
+        self.set_mode(DialMode::Idle);
         self.accumulator = 0;
+    }
+}
+
+struct EventBatcher {
+    events: Vec<&'static str>,
+    deadline: Option<Instant>,
+    window: Duration,
+}
+
+impl EventBatcher {
+    fn new(window: Duration) -> Self {
+        Self {
+            events: Vec::new(),
+            deadline: None,
+            window,
+        }
+    }
+
+    fn push(&mut self, event: &'static str) {
+        if self.deadline.is_none() {
+            self.deadline = Some(Instant::now() + self.window);
+        }
+        self.events.push(event);
+    }
+
+    fn try_flush(&mut self) -> Option<Vec<&'static str>> {
+        let deadline = self.deadline?;
+        if Instant::now() < deadline {
+            return None;
+        }
+        self.deadline = None;
+        Some(std::mem::take(&mut self.events))
+    }
+}
+
+fn emit_batch(events: Vec<&'static str>) {
+    // Count occurrences of each event type
+    let mut counts: Vec<(&'static str, u32)> = Vec::new();
+    for event in events {
+        if let Some((_, count)) = counts.iter_mut().find(|(e, _)| *e == event) {
+            *count += 1;
+        } else {
+            counts.push((event, 1));
+        }
+    }
+    for (event, count) in counts {
+        println!("diald: {} count={}", event, count);
     }
 }
 
@@ -139,21 +216,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut haptic = HapticDevice::new(device_path.clone());
     let mut state = DialState::new();
+    let mut batcher = EventBatcher::new(Duration::from_millis(250));
 
     let idle_timeout = Duration::from_secs(30);
     let notch_threshold = 100;
+
+    println!("diald: state -> disconnected");
 
     let mut open_error_logged = false;
     loop {
         let mut device = loop {
             match Device::open(&device_path) {
-                Ok(device) => {
+                Ok(dev) => {
+                    set_nonblock(&dev)?;
                     println!("diald: opened {}", device_path.display());
-                    println!("diald: name={:?}", device.name());
+                    println!("diald: name={:?}", dev.name());
                     open_error_logged = false;
                     state.reset_to_idle();
                     haptic.reconnect();
-                    break device;
+                    break dev;
                 }
                 Err(err) => {
                     if !open_error_logged {
@@ -170,22 +251,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         loop {
-            // Try to reconnect haptic device if needed
             haptic.try_reconnect_if_needed();
 
-            let events = match device.fetch_events() {
-                Ok(events) => events,
-                Err(err) => {
-                    println!(
-                        "diald: lost device {} ({}), reopening...",
-                        device_path.display(),
-                        err
-                    );
-                    break;
-                }
-            };
+            // Flush batched events if deadline passed
+            if let Some(events) = batcher.try_flush() {
+                emit_batch(events);
+            }
 
-            // Transition to idle after timeout (checked after blocking fetch_events returns)
+            // Transition to idle after timeout
             if state.mode == DialMode::Active {
                 if let Some(last_event) = state.last_event_at {
                     if Instant::now().duration_since(last_event) >= idle_timeout {
@@ -194,10 +267,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            let events = match device.fetch_events() {
+                Ok(events) => events,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(err) => {
+                    println!("diald: lost device {} ({})", device_path.display(), err);
+                    println!("diald: state -> disconnected");
+                    break;
+                }
+            };
+
             for event in events {
                 // Any event transitions from Idle to Active (with vibration)
                 if state.mode == DialMode::Idle {
-                    state.mode = DialMode::Active;
+                    state.set_mode(DialMode::Active);
                     haptic.send_chunky();
                 }
                 state.last_event_at = Some(Instant::now());
@@ -210,29 +296,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         state.accumulator += event.value();
 
-                        // Process notches
                         while state.accumulator >= notch_threshold {
                             state.accumulator -= notch_threshold;
-                            println!("diald: volume up");
+                            batcher.push("volume up");
                         }
                         while state.accumulator <= -notch_threshold {
                             state.accumulator += notch_threshold;
-                            println!("diald: volume down");
+                            batcher.push("volume down");
                         }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
                         if event.value() == 1 {
                             state.clicking = true;
                         } else if state.clicking {
-                            println!("diald: click");
+                            batcher.push("click");
                             state.clicking = false;
                         }
                     }
                     _ => {}
                 }
             }
-
-            thread::sleep(Duration::from_millis(10));
         }
     }
 }
