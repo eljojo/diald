@@ -132,6 +132,7 @@ impl HapticDevice {
 enum DialMode {
     Idle,
     Active,
+    Backlash,
 }
 
 impl DialMode {
@@ -139,6 +140,7 @@ impl DialMode {
         match self {
             DialMode::Idle => "idle",
             DialMode::Active => "active",
+            DialMode::Backlash => "backlash",
         }
     }
 }
@@ -151,9 +153,11 @@ struct DialState {
     last_print_at: Option<Instant>,
     last_printed_volume: i32,
     clicking: bool,
-    last_volume_direction: i32,  // -1, 0, or 1 (at volume level)
-    skip_next_volume_change: bool,
+    last_raw_direction: i32,      // -1, 0, or 1
+    consistent_direction_count: u32,  // consecutive events in same direction
 }
+
+const BACKLASH_THRESHOLD: u32 = 10;  // events needed to exit backlash mode
 
 impl DialState {
     fn new() -> Self {
@@ -165,8 +169,8 @@ impl DialState {
             last_print_at: None,
             last_printed_volume: 50,
             clicking: false,
-            last_volume_direction: 0,
-            skip_next_volume_change: false,
+            last_raw_direction: 0,
+            consistent_direction_count: 0,
         }
     }
 
@@ -180,8 +184,8 @@ impl DialState {
     fn reset_to_idle(&mut self) {
         self.set_mode(DialMode::Idle);
         self.raw_accumulator = 0;
-        self.last_volume_direction = 0;
-        self.skip_next_volume_change = false;
+        self.last_raw_direction = 0;
+        self.consistent_direction_count = 0;
     }
 }
 
@@ -383,7 +387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Transition to idle after timeout
-            if state.mode == DialMode::Active {
+            if state.mode == DialMode::Active || state.mode == DialMode::Backlash {
                 if let Some(last_event) = state.last_event_at {
                     if Instant::now().duration_since(last_event) >= idle_timeout {
                         state.reset_to_idle();
@@ -416,6 +420,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
+                        // Backlash state machine: track direction changes at raw level
+                        let direction = event.value().signum();
+                        if state.last_raw_direction != 0 && direction != state.last_raw_direction {
+                            // Direction changed - enter backlash mode
+                            if state.mode != DialMode::Backlash {
+                                log!("diald: entering backlash (direction {} -> {})", state.last_raw_direction, direction);
+                            }
+                            state.mode = DialMode::Backlash;
+                            state.consistent_direction_count = 1;
+                            state.raw_accumulator = 0;  // discard accumulated movement
+                        } else if direction == state.last_raw_direction {
+                            state.consistent_direction_count += 1;
+                        }
+                        state.last_raw_direction = direction;
+
+                        // Exit backlash mode once direction stabilizes
+                        if state.mode == DialMode::Backlash {
+                            if state.consistent_direction_count >= BACKLASH_THRESHOLD {
+                                log!("diald: exiting backlash (stable for {} events)", state.consistent_direction_count);
+                                state.mode = DialMode::Active;
+                                haptic.send_chunky();
+                            } else {
+                                continue;  // don't process events while in backlash
+                            }
+                        }
+
                         // Accumulate raw input, convert to volume when we have enough
                         // 40 raw = 1 volume unit (400 raw = 10 volume)
                         state.raw_accumulator += event.value();
@@ -423,19 +453,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let volume_delta = state.raw_accumulator / 40;
                         if volume_delta != 0 {
                             state.raw_accumulator -= volume_delta * 40;
-
-                            // Backlash compensation at volume level:
-                            // skip first volume change after direction reversal
-                            let direction = volume_delta.signum();
-                            if state.last_volume_direction != 0 && direction != state.last_volume_direction {
-                                state.skip_next_volume_change = true;
-                            }
-                            state.last_volume_direction = direction;
-
-                            if state.skip_next_volume_change {
-                                state.skip_next_volume_change = false;
-                                continue;
-                            }
 
                             let old_volume = state.volume;
                             let unclamped = state.volume + volume_delta as f64;
@@ -447,11 +464,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             // Buzz when crossing multiples of 10
-                            let old_ten = (old_volume / 10.0).floor() as i32;
-                            let new_ten = (state.volume / 10.0).floor() as i32;
-                            if old_ten != new_ten {
-                                haptic.send_chunky();
-                            }
+                            // let old_ten = (old_volume / 10.0).floor() as i32;
+                            // let new_ten = (state.volume / 10.0).floor() as i32;
+                            // if old_ten != new_ten {
+                            //     haptic.send_chunky();
+                            // }
 
                             // Check if we should print
                             let current_volume = state.volume.round() as i32;
