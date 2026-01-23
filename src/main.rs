@@ -157,7 +157,7 @@ struct DialState {
     consistent_direction_count: u32,  // consecutive events in same direction
 }
 
-const BACKLASH_THRESHOLD: u32 = 10;  // events needed to exit backlash mode
+const BACKLASH_THRESHOLD: u32 = 25;  // events needed to exit backlash mode
 
 impl DialState {
     fn new() -> Self {
@@ -478,7 +478,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             let now = Instant::now();
                             let time_to_print = state.last_print_at
-                                .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                                .map(|t| now.duration_since(t) >= Duration::from_millis(250))
                                 .unwrap_or(true);
 
                             let volume_changed = current_volume != state.last_printed_volume;
