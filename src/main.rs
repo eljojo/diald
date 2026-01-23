@@ -148,7 +148,7 @@ impl DialState {
             last_event_at: None,
             last_dial_at: None,
             accumulator: 0,
-            smoothed_magnitude: 2.0,
+            smoothed_magnitude: 4.0,
             clicking: false,
         }
     }
@@ -163,7 +163,7 @@ impl DialState {
     fn reset_to_idle(&mut self) {
         self.set_mode(DialMode::Idle);
         self.accumulator = 0;
-        self.smoothed_magnitude = 2.0;
+        self.smoothed_magnitude = 4.0;
         self.last_dial_at = None;
     }
 }
@@ -301,7 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let now = Instant::now();
                         if let Some(last) = state.last_dial_at {
                             if now.duration_since(last) > Duration::from_millis(500) {
-                                state.smoothed_magnitude = 2.0;
+                                state.smoothed_magnitude = 4.0;
                             }
                         }
                         state.last_dial_at = Some(now);
@@ -313,12 +313,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         state.smoothed_magnitude = alpha * magnitude + (1.0 - alpha) * state.smoothed_magnitude;
 
                         // Piecewise threshold: precision range has steep slope, fast range gentle
-                        let notch_threshold = if state.smoothed_magnitude < 2.0 {
-                            // 1.0 → 200, 2.0 → 400
-                            (200.0 + (state.smoothed_magnitude - 1.0) * 200.0).clamp(200.0, 400.0) as i32
+                        let notch_threshold = if state.smoothed_magnitude < 4.0 {
+                            // 1.0 → 200, 4.0 → 400
+                            (200.0 + (state.smoothed_magnitude - 1.0) * (200.0 / 3.0)).clamp(200.0, 400.0) as i32
                         } else {
-                            // 2.0 → 400, 22.0 → 600
-                            (400.0 + (state.smoothed_magnitude - 2.0) * 10.0).clamp(400.0, 600.0) as i32
+                            // 4.0 → 400, 24.0 → 600
+                            (400.0 + (state.smoothed_magnitude - 4.0) * 10.0).clamp(400.0, 600.0) as i32
                         };
 
                         state.accumulator += event.value();
