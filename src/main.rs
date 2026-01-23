@@ -173,15 +173,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Try to reconnect haptic device if needed
             haptic.try_reconnect_if_needed();
 
-            // Transition to idle after timeout
-            if state.mode == DialMode::Active {
-                if let Some(last_event) = state.last_event_at {
-                    if Instant::now().duration_since(last_event) >= idle_timeout {
-                        state.reset_to_idle();
-                    }
-                }
-            }
-
             let events = match device.fetch_events() {
                 Ok(events) => events,
                 Err(err) => {
@@ -193,6 +184,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
             };
+
+            // Transition to idle after timeout (checked after blocking fetch_events returns)
+            if state.mode == DialMode::Active {
+                if let Some(last_event) = state.last_event_at {
+                    if Instant::now().duration_since(last_event) >= idle_timeout {
+                        state.reset_to_idle();
+                    }
+                }
+            }
 
             for event in events {
                 // Any event transitions from Idle to Active (with vibration)
