@@ -135,6 +135,7 @@ impl DialMode {
 struct DialState {
     mode: DialMode,
     last_event_at: Option<Instant>,
+    last_dial_at: Option<Instant>,
     accumulator: i32,
     smoothed_magnitude: f64,
     clicking: bool,
@@ -145,6 +146,7 @@ impl DialState {
         Self {
             mode: DialMode::Idle,
             last_event_at: None,
+            last_dial_at: None,
             accumulator: 0,
             smoothed_magnitude: 2.0,
             clicking: false,
@@ -162,6 +164,7 @@ impl DialState {
         self.set_mode(DialMode::Idle);
         self.accumulator = 0;
         self.smoothed_magnitude = 2.0;
+        self.last_dial_at = None;
     }
 }
 
@@ -293,6 +296,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if state.clicking {
                             continue;
                         }
+
+                        // Reset smoothed to neutral after a pause (allows entering precision mode)
+                        let now = Instant::now();
+                        if let Some(last) = state.last_dial_at {
+                            if now.duration_since(last) > Duration::from_millis(500) {
+                                state.smoothed_magnitude = 2.0;
+                            }
+                        }
+                        state.last_dial_at = Some(now);
 
                         // Update smoothed magnitude (small = precise, large = fast)
                         // Asymmetric: fast to rise, slow to fall (resist accidental precision mode)
