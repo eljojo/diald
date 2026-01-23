@@ -296,6 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Update smoothed magnitude (small = precise, large = fast)
                         let magnitude = event.value().abs() as f64;
+                        println!("diald: magnitude={} smoothed={:.1}", magnitude, state.smoothed_magnitude);
                         let alpha = 0.3;
                         state.smoothed_magnitude = alpha * magnitude + (1.0 - alpha) * state.smoothed_magnitude;
 
