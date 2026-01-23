@@ -295,8 +295,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // Update smoothed magnitude (small = precise, large = fast)
+                        // Asymmetric: fast to rise, slow to fall (resist accidental precision mode)
                         let magnitude = event.value().abs() as f64;
-                        let alpha = 0.3;
+                        let alpha = if magnitude > state.smoothed_magnitude { 0.3 } else { 0.1 };
                         state.smoothed_magnitude = alpha * magnitude + (1.0 - alpha) * state.smoothed_magnitude;
 
                         // Piecewise threshold: precision range has steep slope, fast range gentle
