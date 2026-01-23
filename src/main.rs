@@ -151,8 +151,8 @@ struct DialState {
     last_print_at: Option<Instant>,
     last_printed_volume: i32,
     clicking: bool,
-    last_direction: i32,  // -1, 0, or 1
-    backlash_until: Option<Instant>,  // discard old-direction events until this time
+    last_volume_direction: i32,  // -1, 0, or 1 (at volume level)
+    skip_next_volume_change: bool,
 }
 
 impl DialState {
@@ -165,8 +165,8 @@ impl DialState {
             last_print_at: None,
             last_printed_volume: 50,
             clicking: false,
-            last_direction: 0,
-            backlash_until: None,
+            last_volume_direction: 0,
+            skip_next_volume_change: false,
         }
     }
 
@@ -180,8 +180,8 @@ impl DialState {
     fn reset_to_idle(&mut self) {
         self.set_mode(DialMode::Idle);
         self.raw_accumulator = 0;
-        self.last_direction = 0;
-        self.backlash_until = None;
+        self.last_volume_direction = 0;
+        self.skip_next_volume_change = false;
     }
 }
 
@@ -416,29 +416,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
-                        // Backlash compensation: when direction changes, ignore events
-                        // in the OLD direction for 150ms
-                        let direction = event.value().signum();
-                        let now = Instant::now();
-
-                        if state.last_direction != 0 && direction != state.last_direction {
-                            // Direction changed - start backlash window
-                            state.backlash_until = Some(now + Duration::from_millis(150));
-                            state.last_direction = direction;
-                        }
-
-                        // During backlash window, discard events in the old direction
-                        if let Some(until) = state.backlash_until {
-                            if now < until && direction != state.last_direction {
-                                continue;
-                            }
-                            if now >= until {
-                                state.backlash_until = None;
-                            }
-                        }
-
-                        state.last_direction = direction;
-
                         // Accumulate raw input, convert to volume when we have enough
                         // 40 raw = 1 volume unit (400 raw = 10 volume)
                         state.raw_accumulator += event.value();
@@ -446,6 +423,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let volume_delta = state.raw_accumulator / 40;
                         if volume_delta != 0 {
                             state.raw_accumulator -= volume_delta * 40;
+
+                            // Backlash compensation at volume level:
+                            // skip first volume change after direction reversal
+                            let direction = volume_delta.signum();
+                            if state.last_volume_direction != 0 && direction != state.last_volume_direction {
+                                state.skip_next_volume_change = true;
+                            }
+                            state.last_volume_direction = direction;
+
+                            if state.skip_next_volume_change {
+                                state.skip_next_volume_change = false;
+                                continue;
+                            }
 
                             let old_volume = state.volume;
                             let unclamped = state.volume + volume_delta as f64;
