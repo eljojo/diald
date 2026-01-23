@@ -3,10 +3,21 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use evdev::{Device, InputEventKind, Key, RelativeAxisType};
+
+static LOGGING_ENABLED: AtomicBool = AtomicBool::new(true);
+
+macro_rules! log {
+    ($($arg:tt)*) => {
+        if LOGGING_ENABLED.load(Ordering::Relaxed) {
+            println!($($arg)*);
+        }
+    };
+}
 
 fn set_nonblock(device: &Device) -> std::io::Result<()> {
     let fd = device.as_raw_fd();
@@ -75,11 +86,11 @@ impl HapticDevice {
 
         match OpenOptions::new().write(true).open(&path) {
             Ok(file) => {
-                println!("diald: opened haptics {}", path);
+                log!("diald: opened haptics {}", path);
                 Some(file)
             }
             Err(err) => {
-                println!("diald: failed to open haptics {} ({})", path, err);
+                log!("diald: failed to open haptics {} ({})", path, err);
                 None
             }
         }
@@ -111,7 +122,7 @@ impl HapticDevice {
         // Report ID 1 output: repeat=2, manual=3, retrigger=70 (chunky)
         let payload = [1u8, 2u8, 3u8, 70u8, 0u8];
         if let Err(err) = file.write_all(&payload) {
-            println!("diald: haptics write failed ({})", err);
+            log!("diald: haptics write failed ({})", err);
             self.file = None;
         }
     }
@@ -155,7 +166,7 @@ impl DialState {
 
     fn set_mode(&mut self, mode: DialMode) {
         if self.mode != mode {
-            println!("diald: state -> {}", mode.as_str());
+            log!("diald: state -> {}", mode.as_str());
             self.mode = mode;
         }
     }
@@ -211,7 +222,7 @@ fn emit_batch(events: Vec<&'static str>) {
         }
     }
     for (event, count) in counts {
-        println!("diald: {} count={}", event, count);
+        log!("diald: {} count={}", event, count);
     }
 }
 
@@ -224,9 +235,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = DialState::new();
     let mut batcher = EventBatcher::new(Duration::from_millis(250));
 
+    // Disable logging after 30 minutes to preserve SD card
+    thread::spawn(|| {
+        thread::sleep(Duration::from_secs(30 * 60));
+        LOGGING_ENABLED.store(false, Ordering::Relaxed);
+    });
+
     let idle_timeout = Duration::from_secs(30);
 
-    println!("diald: state -> disconnected");
+    log!("diald: state -> disconnected");
 
     let mut open_error_logged = false;
     loop {
@@ -234,8 +251,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match Device::open(&device_path) {
                 Ok(dev) => {
                     set_nonblock(&dev)?;
-                    println!("diald: opened {}", device_path.display());
-                    println!("diald: name={:?}", dev.name());
+                    log!("diald: opened {}", device_path.display());
+                    log!("diald: name={:?}", dev.name());
                     open_error_logged = false;
                     state.reset_to_idle();
                     haptic.reconnect();
@@ -279,8 +296,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 Err(err) => {
-                    println!("diald: lost device {} ({})", device_path.display(), err);
-                    println!("diald: state -> disconnected");
+                    log!("diald: lost device {} ({})", device_path.display(), err);
+                    log!("diald: state -> disconnected");
                     break;
                 }
             };
@@ -327,13 +344,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.accumulator -= notch_threshold;
                             batcher.push("volume up");
                             haptic.send_chunky();
-                            println!("diald: notch threshold={} smoothed={:.1}", notch_threshold, state.smoothed_magnitude);
+                            log!("diald: notch threshold={} smoothed={:.1}", notch_threshold, state.smoothed_magnitude);
                         }
                         while state.accumulator <= -notch_threshold {
                             state.accumulator += notch_threshold;
                             batcher.push("volume down");
                             haptic.send_chunky();
-                            println!("diald: notch threshold={} smoothed={:.1}", notch_threshold, state.smoothed_magnitude);
+                            log!("diald: notch threshold={} smoothed={:.1}", notch_threshold, state.smoothed_magnitude);
                         }
                     }
                     InputEventKind::Key(Key::BTN_0) => {
