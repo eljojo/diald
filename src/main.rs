@@ -151,6 +151,8 @@ struct DialState {
     last_print_at: Option<Instant>,
     last_printed_volume: i32,
     clicking: bool,
+    last_direction: i32,  // -1, 0, or 1
+    direction_changed: bool,
 }
 
 impl DialState {
@@ -163,6 +165,8 @@ impl DialState {
             last_print_at: None,
             last_printed_volume: 50,
             clicking: false,
+            last_direction: 0,
+            direction_changed: false,
         }
     }
 
@@ -176,6 +180,8 @@ impl DialState {
     fn reset_to_idle(&mut self) {
         self.set_mode(DialMode::Idle);
         self.raw_accumulator = 0;
+        self.last_direction = 0;
+        self.direction_changed = false;
     }
 }
 
@@ -395,6 +401,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if state.clicking {
                             continue;
                         }
+
+                        // Detect direction change (backlash compensation)
+                        let direction = event.value().signum();
+                        if state.last_direction != 0 && direction != state.last_direction {
+                            // Direction changed - discard this event if we haven't already
+                            if !state.direction_changed {
+                                state.direction_changed = true;
+                                state.last_direction = direction;
+                                continue;
+                            }
+                        }
+                        state.direction_changed = false;
+                        state.last_direction = direction;
 
                         // Accumulate raw input, convert to volume when we have enough
                         // 40 raw = 1 volume unit (400 raw = 10 volume)
