@@ -155,9 +155,11 @@ struct DialState {
     clicking: bool,
     last_raw_direction: i32,      // -1, 0, or 1
     consistent_direction_count: u32,  // consecutive events in same direction
+    pre_backlash_direction: i32,  // direction before entering backlash
 }
 
 const BACKLASH_THRESHOLD: u32 = 25;  // events needed to exit backlash mode
+const BACKLASH_CANCEL_THRESHOLD: u32 = BACKLASH_THRESHOLD / 5;  // events to cancel false-positive backlash
 
 impl DialState {
     fn new() -> Self {
@@ -171,6 +173,7 @@ impl DialState {
             clicking: false,
             last_raw_direction: 0,
             consistent_direction_count: 0,
+            pre_backlash_direction: 0,
         }
     }
 
@@ -186,6 +189,7 @@ impl DialState {
         self.raw_accumulator = 0;
         self.last_raw_direction = 0;
         self.consistent_direction_count = 0;
+        self.pre_backlash_direction = 0;
     }
 }
 
@@ -426,6 +430,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Direction changed - enter backlash mode
                             if state.mode != DialMode::Backlash {
                                 log!("diald: entering backlash (direction {} -> {})", state.last_raw_direction, direction);
+                                state.pre_backlash_direction = state.last_raw_direction;
                             }
                             state.mode = DialMode::Backlash;
                             state.consistent_direction_count = 1;
@@ -437,7 +442,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Exit backlash mode once direction stabilizes
                         if state.mode == DialMode::Backlash {
-                            if state.consistent_direction_count >= BACKLASH_THRESHOLD {
+                            // Cancel backlash if we quickly return to original direction (false positive)
+                            if direction == state.pre_backlash_direction
+                                && state.consistent_direction_count >= BACKLASH_CANCEL_THRESHOLD
+                            {
+                                log!("diald: canceling backlash (returned to original direction)");
+                                state.mode = DialMode::Active;
+                                // no buzz - quietly resume
+                            } else if state.consistent_direction_count >= BACKLASH_THRESHOLD {
                                 log!("diald: exiting backlash (stable for {} events)", state.consistent_direction_count);
                                 state.mode = DialMode::Active;
                                 haptic.send_chunky();
