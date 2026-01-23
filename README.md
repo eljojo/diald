@@ -90,11 +90,35 @@ MQTT_PASSWORD=secret
 
 ## State Machine
 
-The dial operates in three modes:
+```
+                    ┌─────────────────────────────────┐
+                    │                                 │
+                    ▼                                 │
+              ┌──────────┐                            │
+              │   IDLE   │◄───────────────────────────┤
+              └────┬─────┘        30s timeout         │
+                   │                                  │
+                   │ any input event                  │
+                   │ (buzz)                           │
+                   ▼                                  │
+              ┌──────────┐                            │
+         ┌───►│  ACTIVE  │────────────────────────────┘
+         │    └────┬─────┘
+         │         │
+         │         │ direction change detected
+         │         ▼
+         │    ┌──────────┐
+         │    │ BACKLASH │
+         │    └────┬─────┘
+         │         │
+         │         ├── 50 events in NEW direction ──► exit + buzz
+         │         │
+         └─────────┴── 10 events in OLD direction ──► cancel (no buzz)
+```
 
-- **Idle**: Waiting for user input. Accepts external MQTT volume updates. Transitions to Active on any input event.
-- **Active**: User is interacting with the dial. Ignores external MQTT updates to prevent conflicts. Transitions to Idle after 30 seconds of inactivity.
-- **Backlash**: Temporary state during direction changes (see below). Transitions to Active once movement stabilizes.
+- **Idle**: Waiting for user input. Accepts external MQTT volume updates.
+- **Active**: User is interacting. Ignores MQTT updates to prevent conflicts.
+- **Backlash**: Temporary state during direction changes (see below).
 
 ## Volume Accumulation
 
@@ -104,43 +128,241 @@ Raw encoder events are accumulated and converted to volume units:
 
 This provides a smooth, continuous feel rather than discrete steps.
 
+---
+
 ## Backlash Compensation
 
-Rotary encoders suffer from mechanical backlash - when you reverse direction, the first few signals can be spurious or in the wrong direction. This is especially noticeable on the Surface Dial's sensitive capacitive encoder.
+### What is Mechanical Backlash?
 
-### The Problem
+Rotary encoders have tiny gaps in their mechanical components. When you reverse
+direction, the mechanism must "take up the slack" before it starts registering
+the new direction. During this transition, the encoder outputs garbage.
 
-When you reverse direction, the hardware sends a burst of wrong-direction events *before* we can detect the change. By the time software sees a direction change, it has already committed spurious events.
+```
+  TURNING RIGHT                 REVERSING                  TURNING LEFT
+       ↓                           ↓                            ↓
+   ┌───────┐                  ┌───────┐                    ┌───────┐
+   │encoder│ ──► +5 +5 +5     │encoder│ ──► +2 -1 +1 -3    │encoder│ ──► -5 -5 -5
+   │ wheel │     (correct)    │ wheel │     (GARBAGE!)     │ wheel │     (correct)
+   └───────┘                  └───────┘                    └───────┘
+
+  User input:  ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░████████████
+  Raw events:  +5 +5 +5 +5 +3 +2 -1 +1 -3 -2 -4 -5 -5 -5 -5 -5 -5 -5
+                           └──────────────┘
+                            backlash region
+                           (hardware garbage)
+```
+
+The Surface Dial's capacitive encoder is especially prone to this.
+
+### The Naive Approach (Why It Fails)
+
+A simple approach: "when we see a direction change, enter backlash mode."
+
+```
+  Events:     +5  +5  +5  +3  +2  -4  -4  -4  -4  ...
+                              │   │
+                              │   └── Direction change detected HERE
+                              │       Enter backlash mode
+                              │
+                              └────── But +3 and +2 were ALREADY COMMITTED!
+                                      (they arrived before we detected the change)
+
+  Result: Volume goes UP briefly, then DOWN. User sees: 50 → 51 → 49
+          That +1 glitch is the backlash we failed to catch.
+```
+
+The problem: backlash events arrive BEFORE we can detect the direction change.
+By the time we see `-4`, we've already processed `+3` and `+2`.
 
 ### The Solution: Delay Buffer
 
-Events are held in a **delay buffer** (50 events) before being committed. This acts like a TV broadcast delay - giving us time to detect direction changes and filter backlash before events are processed.
+**Key insight**: We need to "look into the future" to catch backlash before
+committing it. We do this by delaying all event processing by 50 events.
 
-When a direction change is detected at the raw event level, the system enters **Backlash mode**:
+```
+                         DELAY BUFFER (50 events)
+                    ┌─────────────────────────────────┐
+  events enter ───► │ +5 +5 +5 +5 +3 +2 -4 -4 -4 ... │ ───► events exit
+  (most recent)     └─────────────────────────────────┘      (oldest, committed)
+                              ▲
+                              │
+                      We can inspect the whole buffer
+                      before deciding what to commit!
+```
 
-1. **Enter Backlash**: When an event's direction differs from the previous event's direction
-2. **Hold all events**: Events stay in the buffer and are not committed
-3. **Wait for stability**: Count consecutive events in the same direction
+Events sit in the buffer for 50 events before being released. This gives us
+a window to detect direction changes and filter out backlash BEFORE it gets
+committed to the volume.
 
-## Exiting Backlash Mode
+### How It Works: Normal Operation
 
-There are two ways to exit Backlash mode:
+When NOT in backlash mode, events flow through the buffer with a 50-event delay:
 
-### Confirmed direction change (threshold: 50 events)
-If 50 consecutive events occur in the new direction, it's a real direction change:
-- Drain buffer, keeping only events matching the new direction (discard backlash)
-- Buzz to confirm the direction change
-- Resume Active mode
+```
+  Time ──────────────────────────────────────────────────────────────►
 
-### False positive cancellation (threshold: 10 events)
-If 10 consecutive events occur in the *original* direction (before backlash), it was a false trigger:
-- Drain buffer, keeping all events (none were backlash)
-- Resume Active mode quietly (no buzz)
+  Event arrives:    +5
+  Buffer:           [+5]
+  Released:         nothing (buffer not full yet)
 
-This "double anti-backlash" catches both real encoder backlash AND accidental micro-movements from the user's finger.
+  ... 49 more +5 events ...
 
-## Input Preservation
+  Event arrives:    +5 (the 51st event)
+  Buffer:           [+5 +5 +5 +5 +5 ... +5 +5]  (50 events)
+                     ▲                     ▲
+                     │                     └── newest (just arrived)
+                     └── oldest (pushed out, gets committed!)
 
-During normal operation, events flow through the delay buffer with a 50-event latency. This latency is imperceptible to users but provides a critical window for detecting and filtering backlash before events are committed. When exiting Backlash mode, legitimate movement is preserved while spurious direction-change artifacts are filtered out.
+  Accumulator:      += 5
+```
+
+The 50-event latency is imperceptible to users but crucial for backlash detection.
+
+### How It Works: Direction Change (Real Reversal)
+
+```
+  User turns RIGHT, then LEFT.
+  Events: ... +5 +5 +5 +3 +2 -4 -4 -4 -4 -4 ... (50 more -4s)
+                       └────┘
+                       backlash (but we don't know yet!)
+
+  ═══════════════════════════════════════════════════════════════════
+
+  STEP 1: Events +5, +5, +5 flow through normally
+
+  Buffer: [+5 +5 +5 +5 +5 ... +5 +5 +5]    Mode: ACTIVE
+  Committed: ... +5 +5 +5 (oldest events)
+
+  ═══════════════════════════════════════════════════════════════════
+
+  STEP 2: Backlash events +3, +2 arrive (still look like "right" direction)
+
+  Buffer: [+5 +5 +5 ... +5 +5 +3 +2]       Mode: ACTIVE
+  Committed: +5 +5 (more old +5s)
+
+  Note: +3 and +2 are IN THE BUFFER, not committed yet!
+
+  ═══════════════════════════════════════════════════════════════════
+
+  STEP 3: First -4 arrives. Direction change detected!
+
+  Buffer: [+5 +5 ... +5 +3 +2 -4]          Mode: BACKLASH ◄── ENTERED!
+  Committed: NOTHING (we stop releasing events)
+
+  The +3 and +2 are still in the buffer. We caught them in time!
+
+  ═══════════════════════════════════════════════════════════════════
+
+  STEP 4: More -4s arrive. We wait for stability (50 consecutive).
+
+  Buffer: [+5 +3 +2 -4 -4 -4 -4 -4 ...]    Mode: BACKLASH
+  Committed: NOTHING (still holding)
+
+  consecutive_count: 1... 2... 3... ... 49... 50!
+
+  ═══════════════════════════════════════════════════════════════════
+
+  STEP 5: 50 consecutive -4s! Confirmed direction change. Exit backlash.
+
+  Buffer: [+3 +2 -4 -4 -4 ... -4 -4 -4]    Mode: ACTIVE ◄── EXITED!
+
+  drain_matching(direction = -1):
+    - Keep: all the -4s ✓
+    - Discard: +3, +2 ✗ (these were backlash!)
+
+  Committed: sum of -4s only
+  Haptic: BUZZ (confirms direction change to user)
+
+  Result: Volume goes DOWN cleanly. No glitch!
+```
+
+### How It Works: False Positive (User Wobble)
+
+Sometimes the user's finger wobbles, creating a momentary direction blip:
+
+```
+  User turns RIGHT, wobbles, continues RIGHT.
+  Events: ... +5 +5 +5 -1 +5 +5 +5 +5 +5 +5 +5 +5 +5 +5 ...
+                       └┘
+                       accidental blip (not a real reversal)
+
+  ═══════════════════════════════════════════════════════════════════
+
+  STEP 1: The -1 arrives. Direction change detected!
+
+  Buffer: [+5 +5 +5 ... +5 +5 -1]          Mode: BACKLASH ◄── ENTERED!
+  pre_backlash_direction: +1 (we remember we were going right)
+
+  ═══════════════════════════════════════════════════════════════════
+
+  STEP 2: More +5s arrive. We're back to the ORIGINAL direction!
+
+  Buffer: [+5 +5 ... +5 -1 +5 +5 +5 +5 +5 +5 +5 +5 +5 +5]
+                                          Mode: BACKLASH
+
+  consecutive_count in direction +1: 1... 2... 3... ... 10!
+
+  ═══════════════════════════════════════════════════════════════════
+
+  STEP 3: 10 consecutive +5s in ORIGINAL direction! Cancel backlash.
+
+  Buffer: [+5 +5 ... -1 +5 +5 +5 +5 ...]   Mode: ACTIVE ◄── CANCELLED!
+
+  drain_all():
+    - Keep EVERYTHING (including the -1, it's just noise)
+
+  Committed: sum of all events
+  Haptic: (no buzz - quiet cancellation)
+
+  Result: Volume continues UP smoothly. The tiny -1 is negligible.
+```
+
+### Why Two Thresholds?
+
+```
+  BACKLASH_THRESHOLD = 50        To CONFIRM a new direction
+  BACKLASH_CANCEL_THRESHOLD = 10 To CANCEL a false positive
+
+  Why 50 to confirm?
+    - Hardware backlash can produce 20-30 spurious events
+    - We need to be SURE it's a real direction change
+    - 50 consecutive events = definitely intentional
+
+  Why only 10 to cancel?
+    - If we're back to the original direction quickly, it was a wobble
+    - Don't make the user wait 50 events to resume normal operation
+    - 10 events = "yep, still going the same way"
+```
+
+### Summary
+
+```
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                      THE DELAY BUFFER                           │
+  │                                                                 │
+  │  Problem:  Backlash events arrive BEFORE we detect the change   │
+  │  Solution: Don't commit events immediately. Hold them.          │
+  │            Detect the change. THEN decide what to commit.       │
+  │                                                                 │
+  │  ┌──────────┐    ┌──────────────────┐    ┌──────────────────┐  │
+  │  │  Events  │───►│   Delay Buffer   │───►│  Accumulator     │  │
+  │  │  arrive  │    │   (50 events)    │    │  (committed)     │  │
+  │  └──────────┘    └──────────────────┘    └──────────────────┘  │
+  │                          │                                      │
+  │                          ▼                                      │
+  │                  ┌───────────────┐                              │
+  │                  │   Backlash    │                              │
+  │                  │   Detection   │                              │
+  │                  └───────────────┘                              │
+  │                          │                                      │
+  │              ┌───────────┴───────────┐                          │
+  │              ▼                       ▼                          │
+  │     ┌─────────────────┐    ┌─────────────────┐                  │
+  │     │ Confirmed: keep │    │ Cancelled: keep │                  │
+  │     │ only new dir    │    │ everything      │                  │
+  │     └─────────────────┘    └─────────────────┘                  │
+  └─────────────────────────────────────────────────────────────────┘
+```
 
 </details>
