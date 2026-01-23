@@ -1,7 +1,7 @@
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,20 +19,47 @@ fn parse_device_arg() -> Option<PathBuf> {
     None
 }
 
+/// Find the hidraw device that shares the same HID parent as the given event device.
+fn find_hidraw_for_event_device(event_path: &Path) -> Option<String> {
+    // /dev/input/event2 -> event2
+    let event_name = event_path.file_name()?;
+    // /sys/class/input/event2/device -> canonical path to input device
+    let event_sysfs = PathBuf::from("/sys/class/input").join(event_name);
+    let event_device_path = fs::canonicalize(event_sysfs.join("device")).ok()?;
+
+    // Check each hidraw to see if it's an ancestor of our event device
+    let hidraw_dir = fs::read_dir("/sys/class/hidraw").ok()?;
+    for entry in hidraw_dir.flatten() {
+        let hidraw_device_link = entry.path().join("device");
+        if let Ok(hidraw_device_path) = fs::canonicalize(&hidraw_device_link) {
+            // The hidraw's device should be an ancestor of the event's device
+            if event_device_path.starts_with(&hidraw_device_path) {
+                let name = entry.file_name();
+                return Some(format!("/dev/{}", name.to_string_lossy()));
+            }
+        }
+    }
+    None
+}
+
 struct HapticDevice {
     file: Option<File>,
-    path: String,
+    last_retry: Option<Instant>,
+    event_path: PathBuf,
 }
 
 impl HapticDevice {
-    fn new() -> Self {
-        let path = env::var("DIALD_HAPTIC_DEV").unwrap_or_else(|_| "/dev/hidraw0".to_string());
-        let file = Self::try_open(&path);
-        Self { file, path }
+    fn new(event_path: PathBuf) -> Self {
+        let file = Self::try_open(&event_path);
+        Self { file, last_retry: None, event_path }
     }
 
-    fn try_open(path: &str) -> Option<File> {
-        match OpenOptions::new().write(true).open(path) {
+    fn try_open(event_path: &Path) -> Option<File> {
+        let path = env::var("DIALD_HAPTIC_DEV")
+            .ok()
+            .or_else(|| find_hidraw_for_event_device(event_path))?;
+
+        match OpenOptions::new().write(true).open(&path) {
             Ok(file) => {
                 println!("diald: opened haptics {}", path);
                 Some(file)
@@ -45,7 +72,22 @@ impl HapticDevice {
     }
 
     fn reconnect(&mut self) {
-        self.file = Self::try_open(&self.path);
+        self.file = Self::try_open(&self.event_path);
+        self.last_retry = None;
+    }
+
+    fn try_reconnect_if_needed(&mut self) {
+        if self.file.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(last) = self.last_retry {
+            if now.duration_since(last) < Duration::from_secs(1) {
+                return;
+            }
+        }
+        self.last_retry = Some(now);
+        self.file = Self::try_open(&self.event_path);
     }
 
     fn send_chunky(&mut self) {
@@ -124,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| env::var_os("DIALD_DEVICE").map(PathBuf::from))
         .ok_or("missing device path; pass --device or set DIALD_DEVICE")?;
 
-    let mut haptic = HapticDevice::new();
+    let mut haptic = HapticDevice::new(device_path.clone());
     let mut state = DialState::new();
 
     let debounce_window = Duration::from_millis(500);
@@ -159,6 +201,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         loop {
+            // Try to reconnect haptic device if needed
+            haptic.try_reconnect_if_needed();
+
             // Reset state after idle period
             if let Some(last_event) = state.last_event_at {
                 if Instant::now().duration_since(last_event) >= idle_reset {
