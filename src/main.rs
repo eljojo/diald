@@ -217,7 +217,7 @@ impl EventBatcher {
     }
 }
 
-fn emit_batch(events: Vec<&'static str>) {
+fn emit_batch(events: Vec<&'static str>, mqtt: &Option<MqttHandle>) {
     // Count occurrences of each event type
     let mut counts: Vec<(&'static str, u32)> = Vec::new();
     for event in events {
@@ -227,8 +227,22 @@ fn emit_batch(events: Vec<&'static str>) {
             counts.push((event, 1));
         }
     }
-    for (event, count) in counts {
+    for (event, count) in &counts {
         log!("diald: {} count={}", event, count);
+    }
+
+    // Publish clicks to MQTT
+    if let Some(handle) = mqtt {
+        for (event, count) in counts {
+            if event == "click" {
+                let _ = handle.client.publish(
+                    "home/diald/click",
+                    QoS::AtLeastOnce,
+                    false,
+                    count.to_string(),
+                );
+            }
+        }
     }
 }
 
@@ -343,7 +357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Flush batched events if deadline passed
             if let Some(events) = batcher.try_flush() {
-                emit_batch(events);
+                emit_batch(events, &mqtt);
             }
 
             // Check for incoming MQTT volume updates (only when idle)
